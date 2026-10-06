@@ -1,0 +1,256 @@
+"""Extraction des IOC et exports MISP (CSV) / STIX 2.1 (JSON écrit à la main).
+
+Ce module ne dépend pas d'`investigation` : les résultats des étapes 1 à 3
+sont consommés par duck typing.
+"""
+import csv
+import ipaddress
+import json
+import re
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+EXTENSIONS_FICHIERS = {"exe", "dll", "ps1", "bat", "cmd", "vbs", "js", "hta", "txt", "dat",
+                       "tmp", "log", "lnk", "zip", "msi", "doc", "docx", "xls", "xlsx",
+                       "ppt", "pptx", "pdf", "sys"}
+
+NAMESPACE_STIX = uuid.uuid5(uuid.NAMESPACE_URL, "forcert-investigation-automatisee")
+AUTEUR_STIX = "ForCERT - investigation automatisée"
+NOM_RAPPORT = "Incident - investigation automatisée"
+ABSENT = "non décodable"
+
+
+@dataclass
+class IOC:
+    valeur: str
+    type_misp: str
+    categorie_misp: str
+    to_ids: bool
+    commentaire: str
+    # ip_attaque | reseau | hash | compte_cree | tache | commande | compte_compromis | machine
+    role: str = ""
+    statut_enrichissement: str | None = None
+    enrichissement: dict | None = None
+
+
+# --- Motifs ---------------------------------------------------------------
+
+_RE_HASH = [("sha256", re.compile(r"\b[a-fA-F0-9]{64}\b")),
+            ("sha1", re.compile(r"\b[a-fA-F0-9]{40}\b")),
+            ("md5", re.compile(r"\b[a-fA-F0-9]{32}\b"))]
+_RE_URL = re.compile(r"https?://[^\s\"']+", re.IGNORECASE)
+_RE_DOMAINE = re.compile(
+    r"(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,24})(?![\w-])",
+    re.IGNORECASE)
+_RE_IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?!\d)(?!\.\d)")
+
+
+def extraire_motifs(texte: str) -> list[tuple[str, str]]:
+    """Renvoie les (type_misp, valeur) trouvés dans texte, sans doublon, dans l'ordre."""
+    trouves: list[tuple[str, str]] = []
+
+    def ajouter(t, v):
+        if (t, v) not in trouves:
+            trouves.append((t, v))
+
+    texte = texte or ""
+    for type_misp, motif in _RE_HASH:
+        for m in motif.finditer(texte):
+            ajouter(type_misp, m.group(0).lower())
+    for m in _RE_URL.finditer(texte):
+        ajouter("url", m.group(0).rstrip(".,;:)]}"))
+    for m in _RE_DOMAINE.finditer(texte):
+        if m.group(1).lower() not in EXTENSIONS_FICHIERS:
+            ajouter("domain", m.group(0).lower())
+    for m in _RE_IPV4.finditer(texte):
+        try:
+            ipaddress.IPv4Address(m.group(0))
+        except ValueError:
+            continue
+        ajouter("ip-dst", m.group(0))
+    return trouves
+
+
+# --- Extraction -----------------------------------------------------------
+
+def _hm(dt: datetime, jour: bool = False) -> str:
+    return dt.strftime("%d/%m %H:%M" if jour else "%H:%M")
+
+
+def _pl(n: int, sing: str, plur: str) -> str:
+    return sing if n == 1 else plur
+
+
+def _commentaire_ip(p) -> str:
+    libelle = {"spraying": "du password spraying", "force_brute": "de la force brute"}.get(
+        p.categorie, "d'une activité d'échecs d'authentification")
+    n = p.nb_echecs
+    c = len(p.comptes)
+    fin = getattr(p, "fin", None) or p.debut
+    jour = fin.date() != p.debut.date()
+    return (f"IP source {libelle} ({n} {_pl(n, 'échec', 'échecs')} sur "
+            f"{c} {_pl(c, 'compte', 'comptes')}, {_hm(p.debut, jour)}–{_hm(fin, jour)})")
+
+
+def extraire_iocs(det, piv, chronos) -> list[IOC]:
+    """Construit la liste dédoublonnée (type_misp, valeur) des IOC, premier commentaire gardé."""
+    iocs: list[IOC] = []
+    vus: set[tuple[str, str]] = set()
+
+    def ajouter(valeur, type_misp, categorie, to_ids, commentaire, role):
+        if not valeur or (type_misp, valeur) in vus:
+            return
+        if type_misp == "ip-dst" and ("ip-src", valeur) in vus:
+            return  # IP d'attaque déjà connue : on ne la republie pas comme destination
+        vus.add((type_misp, valeur))
+        iocs.append(IOC(valeur, type_misp, categorie, to_ids, commentaire, role))
+
+    for p in det.suspectes:
+        ajouter(p.ip, "ip-src", "Network activity", True, _commentaire_ip(p), "ip_attaque")
+
+    # Comptes connus : évite de prendre un identifiant « prenom.nom » pour un domaine.
+    comptes_connus = {c.compte.lower() for c in piv.compromissions}
+    for ch in chronos:
+        comptes_connus.update(str(s).lower() for s in ch.comptes_suivis)
+        for q in ch.evenements:
+            comptes_connus.add(str(q.evt.account).lower())
+            for cle in ("member", "new_account"):
+                if q.evt.details.get(cle):
+                    comptes_connus.add(str(q.evt.details[cle]).lower())
+
+    for c in piv.compromissions:
+        ajouter(c.compte, "target-user", "Targeting data", False,
+                f"Compte compromis par {c.ip} sur {c.host} à {_hm(c.t0)}", "compte_compromis")
+        ajouter(c.host, "target-machine", "Targeting data", False,
+                f"Machine compromise : connexion réussie de {c.compte} depuis {c.ip} "
+                f"à {_hm(c.t0)}", "machine")
+
+    for ch in chronos:
+        for q in ch.evenements:
+            e = q.evt
+            d = e.details
+            heure = _hm(e.timestamp)
+            if q.nature == "mouvement_lateral":
+                ajouter(e.host, "target-machine", "Targeting data", False,
+                        f"Machine touchée par mouvement latéral : connexion de {e.account} "
+                        f"à {heure}", "machine")
+            elif q.nature == "creation_compte":
+                ajouter(d.get("new_account"), "text", "Persistence mechanism", False,
+                        f"Compte créé par l'attaquant sur {e.host} à {heure}", "compte_cree")
+            elif q.nature == "tache_planifiee":
+                ajouter(d.get("task_name"), "text", "Persistence mechanism", False,
+                        f"Tâche planifiée créée par {e.account} sur {e.host} à {heure}", "tache")
+            elif q.nature == "processus_suspect":
+                ligne = d.get("command_line")
+                if ligne:
+                    ajouter(str(ligne), "text", "Payload installation", False,
+                            f"Ligne de commande suspecte exécutée par {e.account} sur "
+                            f"{e.host} à {heure}", "commande")
+
+            # Motifs : valeurs texte de details + commande décodée.
+            sources = [(k, v) for k, v in d.items() if isinstance(v, str)]
+            if q.commande_decodee and q.commande_decodee != ABSENT:
+                sources.append(("commande décodée", q.commande_decodee))
+            for cle, texte in sources:
+                origine = "commande décodée" if cle == "commande décodée" else "commande"
+                for type_misp, valeur in extraire_motifs(texte):
+                    if type_misp == "domain" and valeur in comptes_connus:
+                        continue
+                    if type_misp == "domain" and valeur == texte.lower():
+                        continue  # valeur entière = identifiant (compte, tâche), pas un domaine
+                    lieu = f"{origine} de {e.account} sur {e.host} à {heure}"
+                    if type_misp in ("md5", "sha1", "sha256"):
+                        ajouter(valeur, type_misp, "Payload delivery", True,
+                                f"Empreinte {type_misp.upper()} observée dans la {lieu}", "hash")
+                    else:
+                        nom = {"url": "URL", "domain": "Domaine", "ip-dst": "IP de destination"}[type_misp]
+                        ajouter(valeur, type_misp, "Network activity", True,
+                                f"{nom} observé(e) dans la {lieu}", "reseau")
+    return iocs
+
+
+# --- Export MISP ----------------------------------------------------------
+
+def exporter_misp_csv(iocs: list[IOC], chemin: str) -> None:
+    """Un fichier = un événement MISP ; to_ids en 1/0, verdict VT ajouté au commentaire."""
+    with open(chemin, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["value", "type", "category", "to_ids", "comment"])
+        for i in iocs:
+            commentaire = i.commentaire
+            if i.statut_enrichissement:
+                commentaire += f" | VT : {i.statut_enrichissement}"
+            w.writerow([i.valeur, i.type_misp, i.categorie_misp, 1 if i.to_ids else 0,
+                        commentaire])
+
+
+# --- Export STIX 2.1 ------------------------------------------------------
+
+def _ts(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _id(type_stix: str, cle: str) -> str:
+    return f"{type_stix}--{uuid.uuid5(NAMESPACE_STIX, f'{type_stix}:{cle}')}"
+
+
+def _echapper(v: str) -> str:
+    return v.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _pattern(type_misp: str, valeur: str) -> str | None:
+    v = _echapper(valeur)
+    if type_misp in ("ip-src", "ip-dst"):
+        objet = "ipv6-addr" if ":" in valeur else "ipv4-addr"
+        return f"[{objet}:value = '{v}']"
+    return {"domain": f"[domain-name:value = '{v}']",
+            "url": f"[url:value = '{v}']",
+            "md5": f"[file:hashes.MD5 = '{v}']",
+            "sha1": f"[file:hashes.'SHA-1' = '{v}']",
+            "sha256": f"[file:hashes.'SHA-256' = '{v}']"}.get(type_misp)
+
+
+def exporter_stix(iocs: list[IOC], chemin: str, genere_le: datetime,
+                  valide_depuis: datetime) -> dict:
+    """Écrit et renvoie le bundle STIX 2.1.
+
+    Indicators pour IP/domaine/URL/hash, user-account pour les comptes compromis
+    et créés. Les noms de tâches et lignes de commande ne sont pas exportés en
+    STIX (ils n'ont pas d'objet STIX naturel) : ils restent propres à l'export MISP.
+    """
+    cree = _ts(genere_le)
+    identite = {"type": "identity", "spec_version": "2.1", "id": _id("identity", AUTEUR_STIX),
+                "created": cree, "modified": cree, "name": AUTEUR_STIX,
+                "identity_class": "organization"}
+    objets = []
+    comptes_vus = set()
+    for i in iocs:
+        pattern = _pattern(i.type_misp, i.valeur)
+        if pattern:
+            objets.append({
+                "type": "indicator", "spec_version": "2.1",
+                "id": _id("indicator", f"{i.type_misp}:{i.valeur}"),
+                "created": cree, "modified": cree, "created_by_ref": identite["id"],
+                "name": f"{i.type_misp} : {i.valeur}", "description": i.commentaire,
+                "indicator_types": ["malicious-activity"],
+                "pattern": pattern, "pattern_type": "stix",
+                "valid_from": _ts(valide_depuis)})
+        elif (i.type_misp == "target-user" or i.role == "compte_cree") \
+                and i.valeur not in comptes_vus:
+            comptes_vus.add(i.valeur)
+            objets.append({"type": "user-account", "spec_version": "2.1",
+                           "id": _id("user-account", i.valeur), "user_id": i.valeur})
+    cle_rapport = "|".join(sorted(f"{i.type_misp}:{i.valeur}" for i in iocs))
+    refs = [o["id"] for o in objets] or [identite["id"]]  # object_refs ne peut pas être vide
+    rapport = {"type": "report", "spec_version": "2.1", "id": _id("report", cle_rapport),
+               "created": cree, "modified": cree, "created_by_ref": identite["id"],
+               "name": NOM_RAPPORT, "report_types": ["incident"], "published": cree,
+               "object_refs": refs}
+    bundle = {"type": "bundle", "id": _id("bundle", cle_rapport),
+              "objects": [identite, *objets, rapport]}
+    with open(chemin, "w", encoding="utf-8") as f:
+        json.dump(bundle, f, indent=2, ensure_ascii=False)
+    return bundle
