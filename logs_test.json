@@ -1,0 +1,747 @@
+[
+  {
+    "timestamp": "2026-03-12T08:00:12Z",
+    "event_id": 4624,
+    "host": "WKS-003",
+    "account": "a.durand",
+    "src_ip": "10.2.5.20",
+    "logon_type": 2,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:01:00Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:01:12Z",
+    "event_id": 4624,
+    "host": "WKS-007",
+    "account": "b.leroy",
+    "src_ip": "10.2.5.21",
+    "logon_type": 2,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:01:18Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:01:36Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:01:54Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:02:00Z",
+    "event_id": 4625,
+    "host": "WKS-022",
+    "account": "a.durand",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:02:12Z",
+    "event_id": 4624,
+    "host": "WKS-022",
+    "account": "m.girard",
+    "src_ip": "10.2.5.22",
+    "logon_type": 2,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:02:12Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:02:27Z",
+    "event_id": 4625,
+    "host": "WKS-003",
+    "account": "b.leroy",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:02:30Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:02:48Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:02:54Z",
+    "event_id": 4625,
+    "host": "WKS-003",
+    "account": "c.moreau",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:03:06Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:03:12Z",
+    "event_id": 4624,
+    "host": "WKS-011",
+    "account": "c.moreau",
+    "src_ip": "10.2.5.23",
+    "logon_type": 2,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:03:21Z",
+    "event_id": 4625,
+    "host": "WKS-022",
+    "account": "d.petit",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:03:24Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:03:42Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:03:48Z",
+    "event_id": 4625,
+    "host": "WKS-011",
+    "account": "e.roux",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:04:00Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:04:15Z",
+    "event_id": 4625,
+    "host": "WKS-007",
+    "account": "f.simon",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:04:18Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:04:36Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:04:42Z",
+    "event_id": 4625,
+    "host": "WKS-007",
+    "account": "g.blanc",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:04:54Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:05:09Z",
+    "event_id": 4625,
+    "host": "WKS-007",
+    "account": "h.faure",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:05:12Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:05:30Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:05:36Z",
+    "event_id": 4625,
+    "host": "WKS-022",
+    "account": "i.garcia",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:05:48Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:06:03Z",
+    "event_id": 4625,
+    "host": "WKS-003",
+    "account": "j.martin",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:06:06Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:06:24Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:06:30Z",
+    "event_id": 4625,
+    "host": "WKS-022",
+    "account": "k.henry",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:06:42Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:06:57Z",
+    "event_id": 4625,
+    "host": "WKS-022",
+    "account": "l.robin",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:07:00Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:07:18Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:07:24Z",
+    "event_id": 4625,
+    "host": "SRV-DC01",
+    "account": "m.girard",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:07:36Z",
+    "event_id": 4625,
+    "host": "SRV-SQL01",
+    "account": "svc_sql",
+    "src_ip": "10.2.5.9",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:07:51Z",
+    "event_id": 4625,
+    "host": "WKS-003",
+    "account": "n.lopez",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:08:18Z",
+    "event_id": 4625,
+    "host": "SRV-DC01",
+    "account": "a.durand",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:08:45Z",
+    "event_id": 4625,
+    "host": "WKS-014",
+    "account": "b.leroy",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:09:12Z",
+    "event_id": 4625,
+    "host": "WKS-003",
+    "account": "c.moreau",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:09:39Z",
+    "event_id": 4625,
+    "host": "WKS-003",
+    "account": "d.petit",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:10:03Z",
+    "event_id": 4625,
+    "host": "WKS-011",
+    "account": "c.moreau",
+    "src_ip": "10.2.5.41",
+    "logon_type": 2,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:10:06Z",
+    "event_id": 4625,
+    "host": "WKS-003",
+    "account": "e.roux",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:10:33Z",
+    "event_id": 4625,
+    "host": "WKS-007",
+    "account": "f.simon",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:11:00Z",
+    "event_id": 4625,
+    "host": "WKS-007",
+    "account": "g.blanc",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:11:27Z",
+    "event_id": 4625,
+    "host": "SRV-DC01",
+    "account": "h.faure",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:11:54Z",
+    "event_id": 4625,
+    "host": "SRV-DC01",
+    "account": "i.garcia",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:12:21Z",
+    "event_id": 4625,
+    "host": "WKS-003",
+    "account": "j.martin",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:12:48Z",
+    "event_id": 4625,
+    "host": "SRV-DC01",
+    "account": "k.henry",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:13:15Z",
+    "event_id": 4625,
+    "host": "WKS-007",
+    "account": "l.robin",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:13:42Z",
+    "event_id": 4625,
+    "host": "WKS-022",
+    "account": "m.girard",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:14:09Z",
+    "event_id": 4625,
+    "host": "WKS-022",
+    "account": "n.lopez",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:14:36Z",
+    "event_id": 4625,
+    "host": "WKS-022",
+    "account": "a.durand",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:15:03Z",
+    "event_id": 4625,
+    "host": "SRV-DC01",
+    "account": "b.leroy",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:15:30Z",
+    "event_id": 4625,
+    "host": "WKS-014",
+    "account": "c.moreau",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:15:57Z",
+    "event_id": 4625,
+    "host": "WKS-007",
+    "account": "d.petit",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:16:24Z",
+    "event_id": 4625,
+    "host": "WKS-014",
+    "account": "e.roux",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:16:51Z",
+    "event_id": 4625,
+    "host": "SRV-DC01",
+    "account": "f.simon",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:17:18Z",
+    "event_id": 4625,
+    "host": "WKS-011",
+    "account": "g.blanc",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:17:45Z",
+    "event_id": 4625,
+    "host": "WKS-003",
+    "account": "h.faure",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:18:12Z",
+    "event_id": 4625,
+    "host": "WKS-007",
+    "account": "i.garcia",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:21:00Z",
+    "event_id": 4624,
+    "host": "WKS-014",
+    "account": "j.martin",
+    "src_ip": "203.0.113.47",
+    "logon_type": 3,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:23:00Z",
+    "event_id": 4688,
+    "host": "WKS-014",
+    "account": "j.martin",
+    "src_ip": null,
+    "logon_type": null,
+    "result": "success",
+    "details": {
+      "process": "powershell.exe",
+      "parent_process": "winword.exe",
+      "command_line": "powershell.exe -nop -w hidden -enc JABjAD0A"
+    }
+  },
+  {
+    "timestamp": "2026-03-12T08:25:00Z",
+    "event_id": 4698,
+    "host": "WKS-014",
+    "account": "j.martin",
+    "src_ip": null,
+    "logon_type": null,
+    "result": "success",
+    "details": {
+      "task_name": "\\MicrosoftUpdateSync"
+    }
+  },
+  {
+    "timestamp": "2026-03-12T08:27:00Z",
+    "event_id": 4720,
+    "host": "WKS-014",
+    "account": "j.martin",
+    "src_ip": null,
+    "logon_type": null,
+    "result": "success",
+    "details": {
+      "new_account": "svc_backup"
+    }
+  },
+  {
+    "timestamp": "2026-03-12T08:28:00Z",
+    "event_id": 4732,
+    "host": "WKS-014",
+    "account": "j.martin",
+    "src_ip": null,
+    "logon_type": null,
+    "result": "success",
+    "details": {
+      "group": "Administrateurs",
+      "member": "svc_backup"
+    }
+  },
+  {
+    "timestamp": "2026-03-12T08:31:00Z",
+    "event_id": 1102,
+    "host": "WKS-014",
+    "account": "j.martin",
+    "src_ip": null,
+    "logon_type": null,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:35:00Z",
+    "event_id": 4624,
+    "host": "WKS-003",
+    "account": "a.durand",
+    "src_ip": "10.2.5.20",
+    "logon_type": 2,
+    "result": "success",
+    "details": {}
+  },
+  {
+    "timestamp": "2026-03-12T08:40:00Z",
+    "event_id": 4688,
+    "host": "WKS-007",
+    "account": "b.leroy",
+    "src_ip": null,
+    "logon_type": null,
+    "result": "success",
+    "details": {
+      "process": "chrome.exe",
+      "parent_process": "explorer.exe",
+      "command_line": "chrome.exe"
+    }
+  }
+]
