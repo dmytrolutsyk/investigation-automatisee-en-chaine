@@ -138,24 +138,35 @@ def _est_prive(ip: str) -> bool:
     return any(adresse in r for r in RESEAUX_PRIVES if adresse.version == r.version)
 
 
+# Noms Windows (comptes, machines) : insensibles à la casse, dédoublonnés en conséquence
+ROLES_SANS_CASSE = {"compte_compromis", "compte_cree", "machine"}
+
+
 def extraire_iocs(det, piv, chronos, est_interne: Callable[[str], bool] | None = None,
                   multi_jours: bool = False) -> list[IOC]:
     """Construit la liste dédoublonnée (type_misp, valeur) des IOC, premier commentaire gardé.
 
     Les motifs réseau et empreintes ne sont cherchés que dans les événements
-    suspects ; une IP interne (est_interne, RFC 1918 par défaut) n'est jamais
-    publiée comme IP de destination. multi_jours : dates dans les commentaires.
+    suspects portant un vrai marqueur : une commande d'un compte suivi sans
+    marqueur connu (attribut sans_marqueur) n'en fournit pas, ni d'IOC
+    « commande » (l'utilisateur légitime peut encore travailler avec ce compte).
+    Une IP interne (est_interne, RFC 1918 par défaut) n'est jamais publiée comme
+    IP de destination. Comptes et machines sont dédoublonnés sans tenir compte
+    de la casse (première graphie gardée). multi_jours : dates dans les commentaires.
     """
     est_interne = est_interne or _est_prive
     iocs: list[IOC] = []
     vus: set[tuple[str, str]] = set()
 
     def ajouter(valeur, type_misp, categorie, to_ids, commentaire, role):
-        if not valeur or (type_misp, valeur) in vus:
+        if not valeur:
+            return
+        cle = (type_misp, valeur.casefold() if role in ROLES_SANS_CASSE else valeur)
+        if cle in vus:
             return
         if type_misp == "ip-dst" and ("ip-src", valeur) in vus:
             return  # IP d'attaque déjà connue : on ne la republie pas comme destination
-        vus.add((type_misp, valeur))
+        vus.add(cle)
         iocs.append(IOC(valeur, type_misp, categorie, to_ids, commentaire, role=role))
 
     for p in det.suspectes:
@@ -173,6 +184,7 @@ def extraire_iocs(det, piv, chronos, est_interne: Callable[[str], bool] | None =
         for q in ch.evenements:
             e = q.evt
             d = e.details
+            sans_marqueur = getattr(q, "sans_marqueur", False)
             heure = _hm(e.timestamp, multi_jours)
             if q.nature == "mouvement_lateral":
                 ajouter(e.host, "target-machine", "Targeting data", False,
@@ -184,7 +196,7 @@ def extraire_iocs(det, piv, chronos, est_interne: Callable[[str], bool] | None =
             elif q.nature == "tache_planifiee":
                 ajouter(d.get("task_name"), "text", "Persistence mechanism", False,
                         f"Tâche planifiée créée par {e.account} sur {e.host} à {heure}", "tache")
-            elif q.nature == "processus_suspect":
+            elif q.nature == "processus_suspect" and not sans_marqueur:
                 ligne = d.get("command_line")
                 if ligne:
                     ajouter(str(ligne), "text", "Payload installation", False,
@@ -192,8 +204,9 @@ def extraire_iocs(det, piv, chronos, est_interne: Callable[[str], bool] | None =
                             f"{e.host} à {heure}", "commande")
 
             # Motifs : valeurs texte de details + commande décodée, pour les seuls
-            # événements suspects (pas l'activité normale d'autres utilisateurs).
-            if not getattr(q, "suspect", False):
+            # événements suspects avec marqueur (pas l'activité normale d'autres
+            # utilisateurs, ni une commande banale d'un compte suivi : intranet...).
+            if not getattr(q, "suspect", False) or sans_marqueur:
                 continue
             sources = [(k, v) for k, v in d.items() if isinstance(v, str)]
             if q.commande_decodee and q.commande_decodee != ABSENT:
@@ -285,8 +298,8 @@ def exporter_stix(iocs: list[IOC], chemin: str, genere_le: datetime,
                 "pattern": pattern, "pattern_type": "stix",
                 "valid_from": _ts(valide_depuis)})
         elif (i.type_misp == "target-user" or i.role == "compte_cree") \
-                and i.valeur not in comptes_vus:
-            comptes_vus.add(i.valeur)
+                and i.valeur.casefold() not in comptes_vus:
+            comptes_vus.add(i.valeur.casefold())
             objets.append({"type": "user-account", "spec_version": "2.1",
                            "id": _id("user-account", i.valeur), "user_id": i.valeur})
     cle_rapport = "|".join(sorted(f"{i.type_misp}:{i.valeur}" for i in iocs))

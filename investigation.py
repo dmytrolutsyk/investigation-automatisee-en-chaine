@@ -103,6 +103,27 @@ class Evenement:
     details: dict
 
 
+def _cle(texte) -> str:
+    """Clé de comparaison d'un nom Windows (compte, machine) : insensible à la casse.
+
+    On compare et regroupe sur cette clé, mais on affiche la première graphie vue.
+    """
+    return (texte or "").casefold()
+
+
+def _dans(nom, noms) -> bool:
+    """nom figure-t-il dans noms, sans tenir compte de la casse ?"""
+    return _cle(nom) in {_cle(n) for n in noms}
+
+
+def _premieres_graphies(noms) -> list[str]:
+    """Noms distincts sans tenir compte de la casse (première graphie gardée), triés."""
+    vus = {}
+    for n in noms:
+        vus.setdefault(_cle(n), n)
+    return sorted(vus.values())
+
+
 class ErreurChargement(Exception):
     """Le fichier de logs est absent, illisible ou de structure invalide."""
 
@@ -262,12 +283,12 @@ def etape1_detection(evts: list[Evenement], seuil_echecs: int = SEUIL_ECHECS,
 
     suspectes, ecartees = [], []
     for ip, liste in par_ip.items():
-        comptes = sorted({e.account for e in liste})
+        comptes = _premieres_graphies(e.account for e in liste)
         categorie, motif = _classer(ip, len(liste), len(comptes),
                                     seuil_echecs, seuil_comptes)
         profil = ProfilIP(
             ip=ip, nb_echecs=len(liste), comptes=comptes,
-            hosts=sorted({e.host for e in liste}),
+            hosts=_premieres_graphies(e.host for e in liste),
             debut=min(e.timestamp for e in liste),
             fin=max(e.timestamp for e in liste),
             categorie=categorie, motif=motif)
@@ -362,12 +383,12 @@ def etape2_pivot(evts: list[Evenement], det: ResultatDetection) -> ResultatPivot
         for e in evts:  # evts est trié : la première occurrence est la plus ancienne
             if (e.event_id == EVT_SUCCES and e.src_ip == profil.ip
                     and e.timestamp >= profil.debut):
-                couples.setdefault((e.account, e.host), e)
+                couples.setdefault((_cle(e.account), _cle(e.host)), e)
         if not couples:
             non_abouties.append(profil)
-        for (compte, host), e in couples.items():
+        for e in couples.values():
             compromissions.append(Compromission(
-                profil.ip, compte, host, e.timestamp, e.logon_type, profil))
+                profil.ip, e.account, e.host, e.timestamp, e.logon_type, profil))
     compromissions.sort(key=lambda c: c.t0)
     return ResultatPivot(compromissions, non_abouties)
 
@@ -395,7 +416,7 @@ def expliquer_etape2(piv: ResultatPivot, multi_jours: bool) -> str:
     for c in piv.compromissions:
         mode = _TYPES_CONNEXION.get(c.logon_type, "de type inconnu")
         origine = ("mot de passe probablement deviné par l'attaquant"
-                   if c.compte in c.profil.comptes else
+                   if _dans(c.compte, c.profil.comptes) else
                    "compte qui ne figurait pas parmi les comptes visés par les échecs")
         lignes.append(
             f"  - L'attaque depuis {c.ip} a abouti : le compte {c.compte} s'est connecté à "
@@ -520,7 +541,7 @@ def _marqueurs_presents(ligne: str, processus: str = "") -> bool:
 
 def _compte_suivi(compte: str, c: Compromission) -> str:
     """« le compte compromis X » ou « le compte créé par l'attaquant X »."""
-    if compte == c.compte:
+    if _cle(compte) == _cle(c.compte):
         return f"le compte compromis {compte}"
     return f"le compte créé par l'attaquant {compte}"
 
@@ -534,12 +555,13 @@ def qualifier_evenement(e: Evenement, c: Compromission,
     suivis = [c.compte] if suivis is None else suivis
     d = e.details
     if e.event_id == EVT_SUCCES:
-        if e.timestamp == c.t0 and e.host == c.host and e.account == c.compte:
+        if (e.timestamp == c.t0 and _cle(e.host) == _cle(c.host)
+                and _cle(e.account) == _cle(c.compte)):
             return EvenementQualifie(
                 e, "connexion_initiale",
                 f"connexion de {e.account} depuis {e.src_ip or 'IP inconnue'} "
                 f"(début de la compromission)", True)
-        if e.host != c.host:
+        if _cle(e.host) != _cle(c.host):
             if e.logon_type in TYPES_CONNEXION_LOCALE:
                 compte = _compte_suivi(e.account, c).replace("le compte", "du compte", 1)
                 return EvenementQualifie(
@@ -572,7 +594,7 @@ def qualifier_evenement(e: Evenement, c: Compromission,
             if re.search(r"https?://", ligne, re.IGNORECASE):
                 desc += " (téléchargement d'un fichier depuis Internet)"
             return EvenementQualifie(e, "processus_suspect", desc, True, decodee)
-        if e.account and e.account in suivis:
+        if e.account and _dans(e.account, suivis):
             return EvenementQualifie(
                 e, "processus_suspect",
                 f"{processus or 'processus inconnu'} : commande exécutée par "
@@ -610,7 +632,8 @@ def etape3_chronologie(evts: list[Evenement], piv: ResultatPivot) -> list[Chrono
 
     Périmètre : événements (hors 4625) à partir de t0 sur la machine compromise,
     ou faits par un compte suivi, ou ajoutant un compte suivi à un groupe. Un
-    compte créé (4720) dans le périmètre est suivi à son tour.
+    compte créé (4720) dans le périmètre est suivi à son tour. Comptes et
+    machines sont comparés sans tenir compte de la casse, comme sous Windows.
     """
     chronos = []
     for c in piv.compromissions:
@@ -620,11 +643,12 @@ def etape3_chronologie(evts: list[Evenement], piv: ResultatPivot) -> list[Chrono
             if e.timestamp < c.t0 or e.event_id == EVT_ECHEC:
                 continue
             membre = e.details.get("member") if e.event_id == EVT_AJOUT_GROUPE else None
-            if e.host == c.host or e.account in suivis or membre in suivis:
+            if (_cle(e.host) == _cle(c.host) or _dans(e.account, suivis)
+                    or (membre and _dans(membre, suivis))):
                 retenus.append(qualifier_evenement(e, c, suivis))
                 if e.event_id == EVT_CREATION_COMPTE:
                     nouveau = e.details.get("new_account")
-                    if nouveau and nouveau not in suivis:
+                    if nouveau and not _dans(nouveau, suivis):
                         suivis.append(nouveau)
         chronos.append(Chronologie(c, retenus, suivis))
     return chronos
@@ -775,12 +799,14 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
                     f"{p.ip} a testé {_pl(len(p.comptes), 'compte', 'comptes')} (password spraying)",
                     f"Revoir la robustesse des mots de passe des {len(p.comptes)} comptes visés par {p.ip}")
 
-    # une action identique n'apparaît qu'une fois, avec sa priorité la plus haute
+    # une action identique (casse des noms Windows ignorée) n'apparaît qu'une
+    # fois, avec sa priorité la plus haute
     retenues = {}
     for a in actions:
-        if a.action not in retenues or (PRIORITES.index(a.priorite)
-                                        < PRIORITES.index(retenues[a.action].priorite)):
-            retenues[a.action] = a
+        cle = _cle(a.action)
+        if cle not in retenues or (PRIORITES.index(a.priorite)
+                                   < PRIORITES.index(retenues[cle].priorite)):
+            retenues[cle] = a
     uniques = list(retenues.values())
     return sorted(uniques, key=lambda a: PRIORITES.index(a.priorite))
 
@@ -815,7 +841,7 @@ def _justifier_gravite(gravite: str, piv: ResultatPivot,
                 if constats else "l'attaquant a étendu son emprise")
     if gravite == "ÉLEVÉE" and piv.compromissions:
         return ("l'attaquant s'est connecté avec succès à "
-                + ", ".join(sorted({c.host for c in piv.compromissions}))
+                + ", ".join(_premieres_graphies(c.host for c in piv.compromissions))
                 + ", sans extension d'emprise constatée")
     if gravite == "MODÉRÉE":
         return "des attaques ont été détectées mais aucune connexion réussie"

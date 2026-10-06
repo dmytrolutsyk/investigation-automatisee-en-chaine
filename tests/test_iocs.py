@@ -258,5 +258,39 @@ class TestIOCRevueFinale(unittest.TestCase):
         self.assertNotIn("04/05", r[0].commentaire)
 
 
+
+class TestIOCResiduel(unittest.TestCase):
+    def test_commande_sans_marqueur_sans_motif(self):
+        from types import SimpleNamespace as N
+        evt = N(timestamp=DEPUIS, event_id=4688, host="H1", account="u",
+                details={"command_line": "chrome.exe https://intranet.acme.fr/rh 198.51.100.77",
+                         "sha256": SHA})
+        q = N(evt=evt, nature="processus_suspect", commande_decodee=None, suspect=True,
+              sans_marqueur=True)
+        r = extraire_iocs(N(suspectes=[]), N(compromissions=[]),
+                          [N(evenements=[q], comptes_suivis=["u"])])
+        self.assertEqual(r, [])
+
+    def test_dedoublonnage_comptes_machines_casse(self):
+        from types import SimpleNamespace as N
+        c1 = N(ip="198.51.100.1", compte="J.Martin", host="WKS-014", t0=DEPUIS)
+        c2 = N(ip="198.51.100.2", compte="j.martin", host="wks-014", t0=DEPUIS)
+
+        def ch(c, nouveau, hote_lateral):
+            crea = N(evt=N(timestamp=DEPUIS, event_id=4720, host=c.host, account=c.compte,
+                           details={"new_account": nouveau}),
+                     nature="creation_compte", commande_decodee=None, suspect=True)
+            lat = N(evt=N(timestamp=DEPUIS, event_id=4624, host=hote_lateral,
+                          account=c.compte, details={}),
+                    nature="mouvement_lateral", commande_decodee=None, suspect=True)
+            return N(compromission=c, evenements=[crea, lat], comptes_suivis=[c.compte])
+
+        r = extraire_iocs(N(suspectes=[]), N(compromissions=[c1, c2]),
+                          [ch(c1, "svc_backup", "SRV-A"), ch(c2, "SVC_BACKUP", "srv-a")])
+        self.assertEqual([(i.type_misp, i.valeur) for i in r],
+                         [("target-user", "J.Martin"), ("target-machine", "WKS-014"),
+                          ("text", "svc_backup"), ("target-machine", "SRV-A")])
+
+
 if __name__ == "__main__":
     unittest.main()
