@@ -6,6 +6,7 @@ contenu et même ordre que le PDF (rapport_pdf), avec une page de garde.
 """
 import os
 import re
+import sys
 
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -30,6 +31,16 @@ MOIS = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août
         "septembre", "octobre", "novembre", "décembre")
 # Caractères interdits en XML 1.0 (contrôles hors tab/LF/CR) et demi-codets isolés
 _INVALIDE_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+
+
+# Éléments de w:pPr qui doivent suivre w:shd (ordre du schéma), et ceux qui suivent w:pBdr
+_APRES_PBDR = ("w:shd", "w:tabs", "w:suppressAutoHyphens", "w:kinsoku", "w:wordWrap",
+               "w:overflowPunct", "w:topLinePunct", "w:autoSpaceDE", "w:autoSpaceDN", "w:bidi",
+               "w:adjustRightInd", "w:snapToGrid", "w:spacing", "w:ind",
+               "w:contextualSpacing", "w:mirrorIndents", "w:suppressOverlap", "w:jc",
+               "w:textDirection", "w:textAlignment", "w:textboxTightWrap", "w:outlineLvl",
+               "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange")
+_APRES_SHD = _APRES_PBDR[1:]
 
 
 # --- Texte ------------------------------------------------------------------
@@ -57,7 +68,10 @@ def _fond(element_pr, couleur: str) -> None:
     shd.set(qn("w:val"), "clear")
     shd.set(qn("w:color"), "auto")
     shd.set(qn("w:fill"), couleur)
-    element_pr.append(shd)
+    if element_pr.tag == qn("w:pPr"):   # respecte l'ordre du schéma (shd avant tabs/spacing/ind/jc)
+        element_pr.insert_element_before(shd, *_APRES_SHD)
+    else:
+        element_pr.append(shd)
 
 
 def _run(p, texte, taille=None, gras=False, italique=False, couleur=None):
@@ -99,7 +113,7 @@ def _bandeau(doc, texte, couleur, taille, avant=10, apres=6, alignement=None):
         for k, v in (("val", "single"), ("sz", "4"), ("space", "3"), ("color", couleur)):
             b.set(qn(f"w:{k}"), v)
         bordures.append(b)
-    p._p.get_or_add_pPr().insert(0, bordures)
+    p._p.get_or_add_pPr().insert_element_before(bordures, *_APRES_PBDR)
     return p
 
 
@@ -149,7 +163,7 @@ def _pied(section, genere_le: str) -> None:
     for k, v in (("val", "single"), ("sz", "6"), ("space", "4"), ("color", TURQUOISE)):
         haut.set(qn(f"w:{k}"), v)
     bord.append(haut)
-    p._p.get_or_add_pPr().append(bord)
+    p._p.get_or_add_pPr().insert_element_before(bord, *_APRES_PBDR)
     _run(p, f"Document généré automatiquement le {genere_le} – ForCERT", 7.5, couleur=GRIS)
     _run(p, "\tPage ", 7.5, couleur=GRIS)
     _champ(p, "PAGE")
@@ -179,9 +193,6 @@ def _tableau(doc, entetes, lignes, largeurs_cm, colonnes_gras=(), couleurs=None,
     t = doc.add_table(rows=1, cols=len(entetes))
     t.alignment = WD_TABLE_ALIGNMENT.CENTER
     t.autofit = False
-    disposition = OxmlElement("w:tblLayout")
-    disposition.set(qn("w:type"), "fixed")
-    t._tbl.tblPr.append(disposition)
     for col, w in zip(t.columns, largeurs):
         col.width = Cm(w)
     couleurs = couleurs or {}
@@ -257,7 +268,12 @@ def _etape(doc, etape: dict, numero: int, condense=False, renvoi="") -> None:
 def _page_de_garde(doc, d: dict, logo) -> None:
     if logo and os.path.isfile(logo):
         p = _para(doc, alignement=WD_ALIGN_PARAGRAPH.CENTER, apres=0)
-        p.add_run().add_picture(logo, width=Cm(7))
+        try:
+            p.add_run().add_picture(logo, width=Cm(7))
+        except Exception:   # image illisible : page de garde sans logo
+            p._p.clear_content()
+            print(f"Avertissement : logo illisible ({logo}), page de garde sans logo.",
+                  file=sys.stderr)
     _para(doc, _txt(d["titre"]), 28, gras=True, couleur=MARINE, avant=70, apres=14,
           alignement=WD_ALIGN_PARAGRAPH.CENTER)
     _bandeau(doc, "Investigation automatisée des journaux Windows", TURQUOISE, 14,
@@ -295,6 +311,8 @@ def generer_docx(chemin: str, donnees: dict, logo: str | None = None) -> None:
     rfonts = normal.element.get_or_add_rPr().get_or_add_rFonts()
     for attr in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
         rfonts.set(qn(attr), POLICE)
+    for zoom in doc.settings.element.findall(qn("w:zoom")):   # gabarit python-docx : percent manquant
+        zoom.set(qn("w:percent"), "100")
     cp = doc.core_properties
     cp.title, cp.author = _propre(donnees["titre"]), "ForCERT"
     cp.subject = "Rapport d'incident généré automatiquement"

@@ -12,7 +12,7 @@ SUFFIXE_TRONQUE = (" … [tronqué pour l'affichage : valeur complète dans le r
 
 def tronquer(valeur, limite: int = LIMITE_AFFICHAGE) -> str:
     """Texte tronqué pour l'affichage (flèche -> ASCII, jetons longs et texte capés)."""
-    texte = str(valeur).replace("→", "->").replace("​", "")
+    texte = str(valeur).replace("→", "->").replace("\u200b", "")
     texte = JETON_LONG.sub(lambda m: m.group(0)[:LIMITE_JETON] + "…[tronqué]", texte)
     if len(texte) > limite:
         texte = texte[:limite] + SUFFIXE_TRONQUE

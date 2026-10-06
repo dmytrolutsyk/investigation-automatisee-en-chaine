@@ -1,4 +1,6 @@
 import base64
+import contextlib
+import io
 import importlib.util
 import os
 import shutil
@@ -83,6 +85,21 @@ class TestRapportWord(unittest.TestCase):
                 e["details"]["command_line"] = "powershell.exe -enc " + charge
         self.assertGreater(len(charge), 9000)
         self.assertIn("tronqué", self.texte(self.generer(evts)))
+
+    def test_ordre_xml_et_logo_corrompu(self):
+        doc = self.generer()
+        for t in doc.tables:
+            self.assertEqual(len(t._tbl.xpath("./w:tblPr/w:tblLayout")), 1)
+        bandeau = next(p for p in doc.paragraphs if p.text == "En bref")
+        noms = [c.tag.split("}")[1] for c in bandeau._p.pPr]
+        self.assertEqual(noms, sorted(noms, key=["keepNext", "pBdr", "shd", "spacing"].index))
+        corrompu = os.path.join(self.dossier, "mauvais.png")
+        with open(corrompu, "wb") as f:
+            f.write(b"pas une image")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            doc = self.generer(logo=corrompu)
+        self.assertEqual(len(doc.inline_shapes), 0)
+        self.assertIn("logo", err.getvalue())
 
     def test_caracteres_de_controle(self):
         from rapport_word import _propre
