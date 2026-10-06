@@ -499,5 +499,203 @@ class TestEtape4(unittest.TestCase):
         self.assertIn("(le déconnecter partout)", textes)
 
 
+# --- Task 8 : étape 5, rapport texte et CLI ---------------------------------
+import contextlib
+import io
+import shutil
+from unittest import mock
+
+from enrichissement_vt import ClientVT
+from investigation import Investigation, expliquer_etape5, investiguer, main, rapport_texte
+from iocs import IOC
+
+RACINE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOGS_FOURNIS = os.path.join(RACINE, "logs_test.json")
+
+
+class _DossierTemporaire(unittest.TestCase):
+    """Exécute chaque test dans un dossier temporaire (main écrit dans le dossier courant)."""
+    def setUp(self):
+        self.dossier = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dossier, True)
+        self.ancien = os.getcwd()
+        os.chdir(self.dossier)
+        self.addCleanup(os.chdir, self.ancien)
+
+    def jeu(self, evenements=None):
+        chemin = ecrire_jeu(evenements)
+        self.addCleanup(os.remove, chemin)
+        return chemin
+
+    def lancer(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+
+class TestBoutEnBout(_DossierTemporaire):
+    def test_jeu_synthetique(self):
+        t = rapport_texte(investiguer(self.jeu()))
+        for n in range(1, 6):
+            self.assertIn(f"=== ÉTAPE {n}", t)
+        self.assertEqual(t.count("Recherche :"), 5)
+        self.assertGreaterEqual(t.count("->"), 5)
+
+    def test_jeu_fourni_non_regression(self):
+        t = rapport_texte(investiguer(LOGS_FOURNIS))
+        for attendu in ("203.0.113.47", "37 échecs", "14 comptes", "j.martin", "WKS-014",
+                        "winword.exe", "\\MicrosoftUpdateSync", "svc_backup", "Administrateurs",
+                        "journal", "10.2.5.9", "svc_sql"):
+            self.assertIn(attendu, t)
+
+    def test_en_tete(self):
+        inv = investiguer(self.jeu())
+        t = rapport_texte(inv)
+        self.assertTrue(t.startswith("RAPPORT D'INVESTIGATION AUTOMATISÉE"))
+        self.assertIn(inv.chemin, t)
+        self.assertIn(f"{len(inv.evts)} événements", t)
+        self.assertIn("UTC", t)
+        self.assertIn(inv.gravite, t)
+        self.assertEqual(inv.gravite, "CRITIQUE")
+        self.assertFalse(inv.multi_jours)
+        self.assertIn("\n\n=== ÉTAPE 1", t)
+
+    def test_jeu_vide(self):
+        chemin = self.jeu([])
+        code, out, _ = self.lancer([chemin])
+        self.assertEqual(code, 0)
+        with open("sortie_rapport.txt", encoding="utf-8") as f:
+            t = f.read()
+        self.assertIn("Aucune IP", t)
+        self.assertIn("aucune donnée", t)
+        for n in range(1, 6):
+            self.assertIn(f"=== ÉTAPE {n}", t)
+        self.assertTrue(os.path.exists("iocs_misp.csv"))
+        self.assertTrue(os.path.exists("iocs_stix.json"))
+
+    def test_sans_4625(self):
+        legitimes = [e for e in construire_jeu() if e["account"] == "p.alpha"]
+        self.assertEqual(len(legitimes), 2)
+        code, out, _ = self.lancer([self.jeu(legitimes)])
+        self.assertEqual(code, 0)
+        self.assertIn("Aucune IP", out)
+        for n in range(1, 6):
+            self.assertIn(f"=== ÉTAPE {n}", out)
+        self.assertIn("FAIBLE", out)
+
+    def test_fichier_absent(self):
+        code, out, err = self.lancer([os.path.join(self.dossier, "inexistant.json")])
+        self.assertEqual(code, 1)
+        self.assertIn("introuvable", err)
+        self.assertFalse(os.path.exists("sortie_rapport.txt"))
+
+    def test_json_invalide(self):
+        chemin = os.path.join(self.dossier, "casse.json")
+        with open(chemin, "w", encoding="utf-8") as f:
+            f.write("{pas du json")
+        code, _, err = self.lancer([chemin])
+        self.assertEqual(code, 1)
+        self.assertIn("JSON invalide", err)
+
+    def test_main_sorties(self):
+        code, out, err = self.lancer([self.jeu()])
+        self.assertEqual(code, 0)
+        with open("sortie_rapport.txt", encoding="utf-8") as f:
+            t = f.read()
+        self.assertIn(t.strip(), out)
+        self.assertNotIn("Fichiers produits", t)
+        self.assertIn("Fichiers produits : sortie_rapport.txt, iocs_misp.csv, iocs_stix.json", out)
+        with open("iocs_misp.csv", encoding="utf-8") as f:
+            self.assertIn(IP_SPRAY_A, f.read())
+        with open("iocs_stix.json", encoding="utf-8") as f:
+            bundle = json.load(f)
+        valides = {o["valid_from"] for o in bundle["objects"] if o["type"] == "indicator"}
+        # première IP suspecte (spray A, 09:00) ; le faux positif de 08:00 n'est pas suspect
+        self.assertEqual(valides, {"2026-05-20T09:00:00.000Z"})
+
+    def test_multi_jours(self):
+        evts = construire_jeu()
+        evts.append({"timestamp": "2026-05-21T06:00:00Z", "event_id": 4624, "host": "WKS-101",
+                     "account": "p.alpha", "src_ip": "10.8.0.11", "logon_type": 2,
+                     "result": "success", "details": {}})
+        inv = investiguer(self.jeu(evts))
+        self.assertTrue(inv.multi_jours)
+        self.assertIn("20/05 09:12", rapport_texte(inv))
+
+    def test_enrichissement_injecte(self):
+        inv = investiguer(self.jeu(), enrichir=True,
+                          client_vt=ClientVT(None, os.path.join(self.dossier, "c.json")))
+        c = inv.comptage_vt
+        self.assertEqual(sum(c.values()), len(inv.iocs))
+        self.assertEqual(c["non_soumis"], 3)   # trois IP de documentation RFC 5737
+        self.assertGreater(c["cle_absente"], 0)
+        self.assertGreater(c["non_applicable"], 0)
+        t = rapport_texte(inv)
+        self.assertIn("RFC 5737", t)
+        self.assertIn("Aucun fichier ni échantillon n'a été envoyé", t)
+        self.assertIn("clé VT_API_KEY absente", t)
+
+    def test_enrichissement_sans_client_lit_l_environnement(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VT_API_KEY", None)
+            inv = investiguer(self.jeu(), enrichir=True)
+        self.assertIn("cle_absente", inv.comptage_vt)
+
+    def test_sans_enrichissement(self):
+        inv = investiguer(self.jeu())
+        self.assertIsNone(inv.comptage_vt)
+        self.assertTrue(all(i.statut_enrichissement is None for i in inv.iocs))
+        self.assertIn("enrichissement non demandé (option --enrichir)", rapport_texte(inv))
+
+    def test_aucune_valeur_en_dur(self):
+        sources = ""
+        for f in ("investigation.py", "iocs.py", "enrichissement_vt.py", "rapport_pdf.py"):
+            if os.path.exists(os.path.join(RACINE, f)):
+                with open(os.path.join(RACINE, f), encoding="utf-8") as fic:
+                    sources += fic.read()
+        for v in ("203.0.113.47", "10.2.5.9", "j.martin", "WKS-014", "svc_backup",
+                  "MicrosoftUpdateSync", "svc_sql", "2026-03-12"):
+            self.assertNotIn(v, sources)
+
+
+class TestEtape5(unittest.TestCase):
+    def iocs(self):
+        return [IOC("198.51.100.23", "ip-src", "Network activity", True, "IP"),
+                IOC("evil.example.net", "domain", "Network activity", True, "dom"),
+                IOC("adm_tmp", "text", "Persistence mechanism", False, "compte",
+                    role="compte_cree")]
+
+    def test_non_enrichi(self):
+        t = expliquer_etape5(self.iocs(), None)
+        self.assertTrue(t.startswith("=== ÉTAPE 5 : IOC ET ENRICHISSEMENT ==="))
+        for motif in ("Recherche :", "Résultat :", "->", "3 IOC", "ip-src", "domain", "text",
+                      "enrichissement non demandé (option --enrichir)",
+                      "iocs_misp.csv", "iocs_stix.json"):
+            self.assertIn(motif, t)
+        self.assertNotIn("Aucun fichier ni échantillon", t)
+
+    def test_enrichi_avec_verdict(self):
+        iocs = self.iocs()
+        iocs[0].statut_enrichissement = "non_soumis"
+        iocs[0].enrichissement = {"message": "plage de documentation RFC 5737, non soumise"}
+        iocs[1].statut_enrichissement = "ok"
+        iocs[1].enrichissement = {"malicious": 3, "suspicious": 1, "harmless": 50,
+                                  "undetected": 10, "reputation": -5}
+        iocs[2].statut_enrichissement = "non_applicable"
+        iocs[2].enrichissement = {"message": "type non pris en charge par VirusTotal"}
+        t = expliquer_etape5(iocs, {"non_soumis": 1, "ok": 1, "non_applicable": 1})
+        self.assertIn("3 moteurs sur 64 le jugent malveillant", t)
+        self.assertIn("RFC 5737", t)
+        self.assertIn("evil.example.net", t)
+        self.assertIn("Aucun fichier ni échantillon n'a été envoyé : seules des valeurs "
+                      "(IP, domaines, URL, empreintes) sont consultées.", t)
+
+    def test_aucun_ioc(self):
+        t = expliquer_etape5([], None)
+        self.assertIn("aucun IOC", t)
+        self.assertIn("->", t)
+
+
 if __name__ == "__main__":
     unittest.main()

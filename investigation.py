@@ -13,6 +13,7 @@ Le chemin des logs surcharge FICHIER_LOGS ; --enrichir active VirusTotal.
 Sorties : rapport texte, PDF, export MISP (CSV) et STIX (JSON).
 Les heures sont affichées en UTC.
 """
+import argparse
 import base64
 import binascii
 from collections import defaultdict
@@ -21,7 +22,12 @@ from datetime import datetime, timezone
 import ipaddress
 import json
 import ntpath
+import os
 import re
+import sys
+
+from enrichissement_vt import ClientVT, enrichir_iocs
+from iocs import exporter_misp_csv, exporter_stix, extraire_iocs
 
 # --- Paramètres -------------------------------------------------------------
 FICHIER_LOGS = "logs_test.json"
@@ -732,3 +738,186 @@ def expliquer_etape4(actions: list[Action], gravite: str, piv: ResultatPivot | N
         "-> L'étape 5 extrait les indicateurs de compromission (IP, comptes, tâches, "
         "commandes, empreintes) pour les partager et les enrichir.")
     return "\n".join(lignes)
+
+
+# --- Étape 5 : IOC et enrichissement ----------------------------------------
+_LIBELLES_IOC = {
+    "ip-src": "IP d'attaque", "ip-dst": "IP de destination", "domain": "domaine",
+    "url": "adresse web", "md5": "empreinte de fichier", "sha1": "empreinte de fichier",
+    "sha256": "empreinte de fichier", "text": "compte créé, tâche ou commande",
+    "target-user": "compte compromis", "target-machine": "machine touchée",
+}
+_LIBELLES_STATUT = {
+    "ok": "verdict obtenu", "inconnu": "inconnu de VirusTotal",
+    "non_soumis": "non soumis", "non_applicable": "non applicable",
+    "cle_absente": "clé absente", "cle_invalide": "clé refusée",
+    "indisponible": "source indisponible",
+}
+# Compteurs de last_analysis_stats additionnés pour le nombre de moteurs
+_STATS_VT = ("malicious", "suspicious", "harmless", "undetected", "timeout",
+             "type-unsupported", "failure", "confirmed-timeout")
+
+
+def _verdict_vt(ioc) -> str:
+    """Résumé lisible du résultat VirusTotal d'un IOC enrichi."""
+    donnees = ioc.enrichissement or {}
+    if ioc.statut_enrichissement == "ok":
+        total = sum(v for k, v in donnees.items()
+                    if k in _STATS_VT and isinstance(v, int))
+        malveillant = donnees.get("malicious") or 0
+        return (f"{malveillant} {'moteur' if malveillant <= 1 else 'moteurs'} sur {total} "
+                f"le {'juge' if malveillant <= 1 else 'jugent'} malveillant")
+    return donnees.get("message") or _LIBELLES_STATUT.get(
+        ioc.statut_enrichissement, str(ioc.statut_enrichissement))
+
+
+def expliquer_etape5(iocs: list, comptage_vt: dict | None) -> str:
+    """Explication en français, destinée à un lecteur non technique."""
+    lignes = ["=== ÉTAPE 5 : IOC ET ENRICHISSEMENT ==="]
+    lignes.append(
+        "Recherche : les indicateurs de compromission (IOC), c'est-à-dire les traces "
+        "réutilisables pour détecter l'attaquant ailleurs, tirés des étapes précédentes : "
+        "IP d'attaque (étape 1), comptes et machines compromis (étape 2), comptes créés, "
+        "tâches planifiées, commandes suspectes et les empreintes, adresses web, domaines "
+        "et IP qu'elles contiennent (étape 3).")
+    if not iocs:
+        lignes.append("Résultat : aucun IOC extrait (aucune IP suspecte ni compromission).")
+    else:
+        par_type = {}
+        for i in iocs:
+            par_type[i.type_misp] = par_type.get(i.type_misp, 0) + 1
+        detail = ", ".join(f"{n} {t} ({_LIBELLES_IOC.get(t, t)})" for t, n in par_type.items())
+        lignes.append(f"Résultat : {len(iocs)} IOC : {detail}.")
+        for i in iocs:
+            ligne = f"  - {i.valeur}  ({i.type_misp})"
+            if comptage_vt is not None and i.statut_enrichissement:
+                ligne += f"  → {_verdict_vt(i)}"
+            lignes.append(ligne)
+    if comptage_vt is None:
+        lignes.append("  Vérification VirusTotal : enrichissement non demandé (option --enrichir).")
+    else:
+        bilan = ", ".join(f"{n} {_LIBELLES_STATUT.get(s, s)}" for s, n in comptage_vt.items())
+        lignes.append(f"  Vérification VirusTotal : {bilan or 'aucun IOC à vérifier'}.")
+        if any("RFC 5737" in ((i.enrichissement or {}).get("message") or "") for i in iocs):
+            lignes.append(
+                "  Note : certaines IP appartiennent aux plages de documentation RFC 5737 "
+                "(adresses réservées aux exemples, inexistantes sur Internet) ; elles ne "
+                "sont pas soumises car VirusTotal ne peut rien en dire.")
+        lignes.append(
+            "  Aucun fichier ni échantillon n'a été envoyé : seules des valeurs "
+            "(IP, domaines, URL, empreintes) sont consultées.")
+    lignes.append(
+        f"-> IOC exportés dans {SORTIE_MISP} (import MISP) et {SORTIE_STIX} "
+        f"(STIX 2.1, pour une plateforme de renseignement sur la menace).")
+    return "\n".join(lignes)
+
+
+# --- Enchaînement, rapport et ligne de commande -----------------------------
+@dataclass
+class Investigation:
+    """Résultats de bout en bout d'une investigation sur un fichier de logs."""
+    chemin: str
+    evts: list[Evenement]
+    det: ResultatDetection
+    piv: ResultatPivot
+    chronos: list[Chronologie]
+    actions: list[Action]
+    gravite: str
+    iocs: list
+    comptage_vt: dict[str, int] | None
+    multi_jours: bool
+
+
+def investiguer(chemin: str, enrichir: bool = False, client_vt=None) -> Investigation:
+    """Enchaîne les étapes 1 à 5 ; lève ErreurChargement si le fichier est inexploitable."""
+    evts = charger_logs(chemin)
+    multi_jours = len({e.timestamp.date() for e in evts}) > 1
+    det = etape1_detection(evts)
+    piv = etape2_pivot(evts, det)
+    chronos = etape3_chronologie(evts, piv)
+    actions = etape4_plan(det, piv, chronos, multi_jours)
+    gravite = evaluer_gravite(piv, chronos)
+    iocs = extraire_iocs(det, piv, chronos)
+    comptage_vt = None
+    if enrichir:
+        if client_vt is None:
+            client_vt = ClientVT(os.environ.get("VT_API_KEY"), VT_CACHE,
+                                 ttl_heures=VT_TTL_HEURES, intervalle_s=VT_INTERVALLE_S,
+                                 timeout_s=VT_TIMEOUT_S, max_essais=VT_MAX_ESSAIS)
+        comptage_vt = enrichir_iocs(iocs, client_vt)
+    return Investigation(chemin, evts, det, piv, chronos, actions, gravite, iocs,
+                         comptage_vt, multi_jours)
+
+
+def rapport_texte(inv: Investigation) -> str:
+    """Rapport complet : en-tête puis les explications des étapes 1 à 5."""
+    if inv.evts:
+        periode = (f"{inv.evts[0].timestamp:%d/%m/%Y %H:%M} → "
+                   f"{inv.evts[-1].timestamp:%d/%m/%Y %H:%M} UTC")
+    else:
+        periode = "aucune donnée"
+    en_tete = "\n".join([
+        "RAPPORT D'INVESTIGATION AUTOMATISÉE",
+        f"Fichier analysé : {inv.chemin}",
+        f"Événements analysés : {_pl(len(inv.evts), 'événement', 'événements')}",
+        f"Période couverte : {periode}",
+        "Toutes les heures du rapport sont exprimées en UTC.",
+        f"Gravité : {inv.gravite}",
+    ])
+    blocs = [
+        en_tete,
+        expliquer_etape1(inv.det, inv.multi_jours),
+        expliquer_etape2(inv.piv, inv.multi_jours),
+        expliquer_etape3(inv.chronos, inv.multi_jours),
+        expliquer_etape4(inv.actions, inv.gravite, inv.piv, inv.chronos,
+                         nb_ip_suspectes=len(inv.det.suspectes)),
+        expliquer_etape5(inv.iocs, inv.comptage_vt),
+    ]
+    return "\n\n".join(blocs) + "\n"
+
+
+def _valide_depuis(inv: Investigation, genere_le: datetime) -> datetime:
+    """Début de validité STIX : première IP suspecte, sinon premier événement."""
+    if inv.det.suspectes:
+        return inv.det.suspectes[0].debut
+    if inv.evts:
+        return inv.evts[0].timestamp
+    return genere_le
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Point d'entrée : rapport sur la sortie standard et fichiers dans le dossier courant."""
+    parseur = argparse.ArgumentParser(
+        description="Investigation chaînée automatisée de logs de sécurité Windows.")
+    parseur.add_argument("chemin", nargs="?", default=FICHIER_LOGS,
+                         help=f"fichier JSON de logs (défaut : {FICHIER_LOGS})")
+    parseur.add_argument("--enrichir", action="store_true",
+                         help="interroger VirusTotal (clé dans VT_API_KEY)")
+    args = parseur.parse_args(argv)
+
+    if args.enrichir:
+        print(f"Enrichissement VirusTotal : au moins {VT_INTERVALLE_S} s entre deux "
+              f"requêtes, cela peut prendre quelques minutes.", file=sys.stderr)
+    try:
+        inv = investiguer(args.chemin, enrichir=args.enrichir)
+    except ErreurChargement as exc:
+        print(f"Erreur : {exc}", file=sys.stderr)
+        return 1
+
+    texte = rapport_texte(inv)
+    print(texte, end="")
+    genere_le = datetime.now(timezone.utc)
+    try:
+        with open(SORTIE_TXT, "w", encoding="utf-8") as f:
+            f.write(texte)
+        exporter_misp_csv(inv.iocs, SORTIE_MISP)
+        exporter_stix(inv.iocs, SORTIE_STIX, genere_le, _valide_depuis(inv, genere_le))
+    except OSError as exc:
+        print(f"Erreur : écriture des fichiers de sortie impossible ({exc})", file=sys.stderr)
+        return 1
+    print(f"\nFichiers produits : {SORTIE_TXT}, {SORTIE_MISP}, {SORTIE_STIX}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
