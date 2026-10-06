@@ -5,9 +5,10 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from investigation import (ErreurChargement, Evenement, charger_logs, est_interne,
-                           etape1_detection, expliquer_etape1, formater_heure)
+                           etape1_detection, etape2_pivot, expliquer_etape1,
+                           expliquer_etape2, formater_heure)
 from tests.jeu_synthetique import (IP_BRUTE, IP_FP, IP_SPRAY_A, IP_SPRAY_B,
-                                   chemin_jeu_synthetique)
+                                   chemin_jeu_synthetique, construire_jeu, ecrire_jeu)
 
 
 def ecrire_tmp(objets):
@@ -177,6 +178,56 @@ class TestEtape1(unittest.TestCase):
     def test_aucune_ip_suspecte(self):
         t = expliquer_etape1(etape1_detection([]), multi_jours=False)
         self.assertIn("Aucune IP", t)
+
+
+class TestEtape2(unittest.TestCase):
+    def _pivot(self, supplementaires=()):
+        chemin = ecrire_jeu(construire_jeu() + list(supplementaires))
+        self.addCleanup(os.remove, chemin)
+        evts = charger_logs(chemin)
+        return etape2_pivot(evts, etape1_detection(evts))
+
+    @staticmethod
+    def _succes(ts, host, compte, ip, logon_type=3):
+        return {"timestamp": ts, "event_id": 4624, "host": host, "account": compte,
+                "src_ip": ip, "logon_type": logon_type, "result": "success",
+                "details": {}}
+
+    def test_compromission_synthetique(self):
+        piv = self._pivot()
+        self.assertEqual(
+            [(x.ip, x.compte, x.host, x.t0.strftime("%H:%M"), x.logon_type)
+             for x in piv.compromissions],
+            [(IP_SPRAY_A, "u.trois", "SRV-FILE02", "09:12", 3)])
+        self.assertEqual([p.ip for p in piv.non_abouties], [IP_SPRAY_B, IP_BRUTE])
+
+    def test_succes_avant_premier_echec_ignore(self):
+        # Connexion légitime à 09:59, avant le premier échec de l'IP (10:00)
+        piv = self._pivot([self._succes("2026-05-20T09:59:00Z", "WKS-110", "v.a",
+                                        IP_SPRAY_B)])
+        self.assertEqual([x.ip for x in piv.compromissions], [IP_SPRAY_A])
+        self.assertIn(IP_SPRAY_B, [p.ip for p in piv.non_abouties])
+
+    def test_plusieurs_couples(self):
+        piv = self._pivot([
+            self._succes("2026-05-20T09:13:00Z", "SRV-FILE03", "u.un", IP_SPRAY_A),
+            # même couple que l'original, plus tard : une seule compromission
+            self._succes("2026-05-20T09:40:00Z", "SRV-FILE02", "u.trois", IP_SPRAY_A)])
+        self.assertEqual(
+            [(x.compte, x.host, x.t0.strftime("%H:%M")) for x in piv.compromissions],
+            [("u.trois", "SRV-FILE02", "09:12"), ("u.un", "SRV-FILE03", "09:13")])
+        self.assertEqual([p.ip for p in piv.non_abouties], [IP_SPRAY_B, IP_BRUTE])
+
+    def test_explication(self):
+        t = expliquer_etape2(self._pivot(), False)
+        for attendu in ("=== ÉTAPE 2", "u.trois", "SRV-FILE02", "09:12", "a abouti",
+                        "accès réseau", IP_SPRAY_B, "n'a pas abouti"):
+            self.assertIn(attendu, t)
+
+    def test_explication_sans_ip_suspecte(self):
+        evts = []
+        piv = etape2_pivot(evts, etape1_detection(evts))
+        self.assertIn("rien à pivoter", expliquer_etape2(piv, False))
 
 
 if __name__ == "__main__":

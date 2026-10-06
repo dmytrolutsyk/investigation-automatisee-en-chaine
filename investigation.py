@@ -284,3 +284,87 @@ def expliquer_etape1(det: ResultatDetection, multi_jours: bool) -> str:
             "-> Aucune IP ne dépasse les seuils : les étapes suivantes n'ont rien sur "
             "quoi s'appuyer.")
     return "\n".join(lignes)
+
+
+# --- Étape 2 : pivot --------------------------------------------------------
+@dataclass
+class Compromission:
+    """Première connexion réussie d'une IP suspecte sur un couple compte/machine."""
+    ip: str
+    compte: str
+    host: str
+    t0: datetime
+    logon_type: int | None
+    profil: ProfilIP
+
+
+@dataclass
+class ResultatPivot:
+    compromissions: list[Compromission]   # triées par t0
+    non_abouties: list[ProfilIP]          # IP suspectes sans connexion réussie
+
+
+def etape2_pivot(evts: list[Evenement], det: ResultatDetection) -> ResultatPivot:
+    """Cherche les connexions réussies (4624) depuis les IP suspectes.
+
+    Seules comptent les connexions à partir du premier échec de l'IP : une
+    connexion antérieure est celle d'un utilisateur légitime. Une compromission
+    par couple (compte, machine), à la date de sa première connexion.
+    """
+    compromissions, non_abouties = [], []
+    for profil in det.suspectes:
+        couples = {}
+        for e in evts:  # evts est trié : la première occurrence est la plus ancienne
+            if (e.event_id == EVT_SUCCES and e.src_ip == profil.ip
+                    and e.timestamp >= profil.debut):
+                couples.setdefault((e.account, e.host), e)
+        if not couples:
+            non_abouties.append(profil)
+        for (compte, host), e in couples.items():
+            compromissions.append(Compromission(
+                profil.ip, compte, host, e.timestamp, e.logon_type, profil))
+    compromissions.sort(key=lambda c: c.t0)
+    return ResultatPivot(compromissions, non_abouties)
+
+
+_TYPES_CONNEXION = {3: "par accès réseau", 2: "par ouverture de session interactive",
+                    10: "par bureau à distance (RDP)"}
+
+
+def expliquer_etape2(piv: ResultatPivot, multi_jours: bool) -> str:
+    """Explication en français, destinée à un lecteur non technique."""
+    lignes = ["=== ÉTAPE 2 : L'ATTAQUE A-T-ELLE ABOUTI ? ==="]
+    if not piv.compromissions and not piv.non_abouties:
+        lignes.append(
+            "Recherche : les connexions réussies (événement 4624) depuis les IP suspectes.")
+        lignes.append("Résultat : aucune IP suspecte à l'étape 1, donc rien à pivoter.")
+        lignes.append("-> Pas de compromission à reconstituer.")
+        return "\n".join(lignes)
+
+    lignes.append(
+        "Recherche : pour chaque IP suspecte, les connexions réussies (événement 4624) "
+        "survenues après son premier échec, c'est-à-dire un compte deviné par l'attaquant.")
+    lignes.append(
+        f"Résultat : {_pl(len(piv.compromissions), 'compromission', 'compromissions')} "
+        f"; {_pl(len(piv.non_abouties), 'IP suspecte', 'IP suspectes')} sans connexion réussie.")
+    for c in piv.compromissions:
+        mode = _TYPES_CONNEXION.get(c.logon_type, "de type inconnu")
+        lignes.append(
+            f"  - L'attaque depuis {c.ip} a abouti : le compte {c.compte} s'est connecté à "
+            f"{c.host} à {formater_heure(c.t0, multi_jours)}, {mode}.")
+    for p in piv.non_abouties:
+        lignes.append(
+            f"  - L'attaque depuis {p.ip} n'a pas abouti : aucune connexion réussie "
+            f"depuis cette IP.")
+    if piv.compromissions:
+        cibles = ", ".join(
+            f"{c.host} après {formater_heure(c.t0, multi_jours)}"
+            for c in piv.compromissions)
+        lignes.append(
+            f"-> L'étape 3 reconstitue l'activité sur {'la machine' if len(piv.compromissions) == 1 else 'les machines'} "
+            f"touchée{'' if len(piv.compromissions) == 1 else 's'} : {cibles}.")
+    else:
+        lignes.append(
+            "-> Aucune connexion réussie : il n'y a pas d'activité à reconstituer ; "
+            "ces tentatives sont à bloquer et surveiller.")
+    return "\n".join(lignes)
