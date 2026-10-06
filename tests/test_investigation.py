@@ -2,9 +2,9 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
-from investigation import (ErreurChargement, charger_logs, est_interne,
+from investigation import (ErreurChargement, Evenement, charger_logs, est_interne,
                            etape1_detection, expliquer_etape1, formater_heure)
 from tests.jeu_synthetique import (IP_BRUTE, IP_FP, IP_SPRAY_A, IP_SPRAY_B,
                                    chemin_jeu_synthetique)
@@ -126,6 +126,53 @@ class TestEtape1(unittest.TestCase):
                         "12 échecs", "6 comptes", "09:00", "password spraying",
                         "force brute", IP_FP, "svc_web", "compte de service"):
             self.assertIn(attendu, t)
+
+    def test_seuils_dans_explication(self):
+        det = etape1_detection(self._evts(), seuil_echecs=13, seuil_comptes=7)
+        t = expliquer_etape1(det, multi_jours=False)
+        self.assertIn("à partir de 13 échecs", t)
+        self.assertIn("au moins 7 comptes", t)
+        self.assertNotIn("à partir de 10 échecs", t)
+
+    def test_singulier_force_brute(self):
+        t = expliquer_etape1(self.det, multi_jours=False)
+        ligne = [l for l in t.splitlines() if IP_BRUTE in l][0]
+        self.assertIn("1 compte,", ligne)
+        self.assertNotIn("1 comptes", t)
+        self.assertIn("machine visée : SRV-VPN01", ligne)
+
+    def test_multi_jours_dans_explication(self):
+        t = expliquer_etape1(self.det, multi_jours=True)
+        self.assertIn("20/05 09:00", t)
+
+    @staticmethod
+    def _echecs(ip, comptes, n, event_id=4625):
+        base = datetime(2026, 5, 20, 8, 0, tzinfo=timezone.utc)
+        return [Evenement(base + timedelta(seconds=i), event_id, "H1",
+                          comptes[i % len(comptes)], ip, 3, "", {})
+                for i in range(n)]
+
+    def test_interne_plusieurs_comptes_sous_seuil_ecartee(self):
+        det = etape1_detection(self._echecs("10.1.1.1", ["a", "b", "c"], 12))
+        self.assertEqual(det.suspectes, [])
+        self.assertEqual([(p.ip, p.categorie) for p in det.ecartees],
+                         [("10.1.1.1", "sous_seuil")])
+
+    def test_sous_seuil_echecs_non_ecartee(self):
+        det = etape1_detection(self._echecs("198.51.100.9", ["a", "b"], 9))
+        self.assertEqual((det.suspectes, det.ecartees), ([], []))
+        self.assertEqual(det.nb_ip_analysees, 1)
+
+    def test_src_ip_absente_ignoree(self):
+        evts = self._echecs(None, ["a"], 20) + self._echecs("", ["a"], 20)
+        det = etape1_detection(evts)
+        self.assertEqual((det.nb_echecs_total, det.nb_ip_analysees), (0, 0))
+        self.assertEqual((det.suspectes, det.ecartees), ([], []))
+
+    def test_4624_non_compte(self):
+        evts = self._echecs("198.51.100.9", ["a"], 20, event_id=4624)
+        det = etape1_detection(evts)
+        self.assertEqual((det.nb_echecs_total, det.suspectes), (0, []))
 
     def test_aucune_ip_suspecte(self):
         t = expliquer_etape1(etape1_detection([]), multi_jours=False)
