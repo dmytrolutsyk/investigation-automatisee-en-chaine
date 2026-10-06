@@ -4,8 +4,10 @@ import tempfile
 import unittest
 from datetime import timezone
 
-from investigation import ErreurChargement, charger_logs
-from tests.jeu_synthetique import chemin_jeu_synthetique
+from investigation import (ErreurChargement, charger_logs, est_interne,
+                           etape1_detection, expliquer_etape1, formater_heure)
+from tests.jeu_synthetique import (IP_BRUTE, IP_FP, IP_SPRAY_A, IP_SPRAY_B,
+                                   chemin_jeu_synthetique)
 
 
 def ecrire_tmp(objets):
@@ -70,6 +72,64 @@ class TestChargement(unittest.TestCase):
         self.assertEqual(len(evts), 2 + 12 + 12 + 7 + 15 + 11)
         self.assertEqual([e.timestamp for e in evts],
                          sorted(e.timestamp for e in evts))
+
+
+class TestEtape1(unittest.TestCase):
+    def _evts(self):
+        chemin = chemin_jeu_synthetique()
+        self.addCleanup(os.remove, chemin)
+        return charger_logs(chemin)
+
+    def setUp(self):
+        self.det = etape1_detection(self._evts())
+
+    def test_suspectes_et_categories(self):
+        self.assertEqual(
+            [(p.ip, p.categorie, p.nb_echecs, len(p.comptes)) for p in self.det.suspectes],
+            [(IP_SPRAY_A, "spraying", 12, 6), (IP_SPRAY_B, "spraying", 15, 8),
+             (IP_BRUTE, "force_brute", 11, 1)])
+
+    def test_faux_positif_ecarte(self):
+        self.assertEqual([(p.ip, p.categorie) for p in self.det.ecartees],
+                         [(IP_FP, "faux_positif_probable")])
+
+    def test_fenetre(self):
+        a = self.det.suspectes[0]
+        self.assertEqual((a.debut.strftime("%H:%M:%S"), a.fin.strftime("%H:%M:%S")),
+                         ("09:00:00", "09:07:20"))
+        self.assertEqual(a.hosts, ["SRV-FILE02"])
+
+    def test_totaux(self):
+        self.assertEqual(self.det.nb_echecs_total, 12 + 12 + 15 + 11)
+        self.assertEqual(self.det.nb_ip_analysees, 4)
+
+    def test_incoherence_result_comptee(self):
+        self.assertEqual(self.det.nb_incoherences_result, 12 + 12 + 15 + 11)
+
+    def test_est_interne(self):
+        self.assertTrue(est_interne("10.8.0.50"))
+        self.assertFalse(est_interne("203.0.113.200"))
+        self.assertFalse(est_interne("pas-une-ip"))
+
+    def test_seuils_parametrables(self):
+        det = etape1_detection(self._evts(), seuil_echecs=13)
+        self.assertEqual(det.suspectes[0].ip, IP_SPRAY_B)
+
+    def test_formater_heure(self):
+        dt = self.det.suspectes[0].debut
+        self.assertEqual(formater_heure(dt, False), "09:00")
+        self.assertEqual(formater_heure(dt, True), "20/05 09:00")
+
+    def test_explication(self):
+        t = expliquer_etape1(self.det, multi_jours=False)
+        for attendu in ("=== ÉTAPE 1", "Recherche :", "Résultat :", "->", IP_SPRAY_A,
+                        "12 échecs", "6 comptes", "09:00", "password spraying",
+                        "force brute", IP_FP, "svc_web", "compte de service"):
+            self.assertIn(attendu, t)
+
+    def test_aucune_ip_suspecte(self):
+        t = expliquer_etape1(etape1_detection([]), multi_jours=False)
+        self.assertIn("Aucune IP", t)
 
 
 if __name__ == "__main__":

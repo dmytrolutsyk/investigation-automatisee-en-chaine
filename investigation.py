@@ -13,8 +13,10 @@ Le chemin des logs surcharge FICHIER_LOGS ; --enrichir active VirusTotal.
 Sorties : rapport texte, PDF, export MISP (CSV) et STIX (JSON).
 Les heures sont affichées en UTC.
 """
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import ipaddress
 import json
 
 # --- Paramètres -------------------------------------------------------------
@@ -132,3 +134,134 @@ def charger_logs(chemin: str) -> list[Evenement]:
         ))
     evenements.sort(key=lambda e: e.timestamp)
     return evenements
+
+
+# --- Étape 1 : détection ----------------------------------------------------
+@dataclass
+class ProfilIP:
+    """Profil d'échecs d'authentification d'une IP source."""
+    ip: str
+    nb_echecs: int
+    comptes: list[str]
+    hosts: list[str]
+    debut: datetime
+    fin: datetime
+    categorie: str  # spraying | force_brute | faux_positif_probable | sous_seuil
+    motif: str
+
+
+@dataclass
+class ResultatDetection:
+    suspectes: list[ProfilIP]   # triées par début d'activité
+    ecartees: list[ProfilIP]    # non suspectes, mais au-dessus du seuil d'échecs
+    nb_echecs_total: int
+    nb_ip_analysees: int
+    nb_incoherences_result: int  # 4625 dont le champ result vaut "success"
+
+
+def est_interne(ip: str) -> bool:
+    """Vrai si l'IP appartient à RESEAUX_INTERNES ; une IP invalide n'est pas interne."""
+    try:
+        adresse = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(adresse in ipaddress.ip_network(r) for r in RESEAUX_INTERNES
+               if adresse.version == ipaddress.ip_network(r).version)
+
+
+def _classer(ip, nb_echecs, nb_comptes, seuil_echecs, seuil_comptes):
+    """Renvoie (catégorie, motif) pour une IP selon les seuils."""
+    interne = est_interne(ip)
+    if nb_echecs >= seuil_echecs and nb_comptes >= seuil_comptes:
+        return "spraying", (f"{nb_echecs} échecs sur {nb_comptes} comptes différents : "
+                            "une même source essaie de nombreux comptes (password spraying)")
+    if nb_echecs >= seuil_echecs and not interne:
+        return "force_brute", (f"{nb_echecs} échecs sur {nb_comptes} compte(s) depuis une "
+                               "IP externe : acharnement sur peu de comptes (force brute)")
+    if nb_echecs >= seuil_echecs and nb_comptes == 1:
+        return "faux_positif_probable", (
+            f"{nb_echecs} échecs sur un seul compte depuis le réseau interne : "
+            "probablement un compte de service dont le mot de passe a expiré")
+    if interne and nb_echecs >= seuil_echecs:
+        return "sous_seuil", (f"IP interne avec {nb_comptes} comptes, "
+                              f"sous le seuil de {seuil_comptes} comptes")
+    return "sous_seuil", f"{nb_echecs} échecs, sous le seuil de {seuil_echecs}"
+
+
+def etape1_detection(evts: list[Evenement], seuil_echecs: int = SEUIL_ECHECS,
+                     seuil_comptes: int = SEUIL_COMPTES) -> ResultatDetection:
+    """Repère les IP à rafales d'échecs (4625) et les classe."""
+    par_ip = defaultdict(list)
+    incoherences = 0
+    total = 0
+    for e in evts:
+        if e.event_id != EVT_ECHEC or not e.src_ip:
+            continue
+        total += 1
+        par_ip[e.src_ip].append(e)
+        if e.result == "success":
+            incoherences += 1
+
+    suspectes, ecartees = [], []
+    for ip, liste in par_ip.items():
+        comptes = sorted({e.account for e in liste})
+        categorie, motif = _classer(ip, len(liste), len(comptes),
+                                    seuil_echecs, seuil_comptes)
+        profil = ProfilIP(
+            ip=ip, nb_echecs=len(liste), comptes=comptes,
+            hosts=sorted({e.host for e in liste}),
+            debut=min(e.timestamp for e in liste),
+            fin=max(e.timestamp for e in liste),
+            categorie=categorie, motif=motif)
+        if categorie in ("spraying", "force_brute"):
+            suspectes.append(profil)
+        elif profil.nb_echecs >= seuil_echecs:
+            ecartees.append(profil)
+    suspectes.sort(key=lambda p: p.debut)
+    ecartees.sort(key=lambda p: p.debut)
+    return ResultatDetection(suspectes, ecartees, total, len(par_ip), incoherences)
+
+
+def formater_heure(dt: datetime, multi_jours: bool) -> str:
+    """HH:MM, ou JJ/MM HH:MM si les données couvrent plusieurs jours."""
+    return dt.strftime("%d/%m %H:%M" if multi_jours else "%H:%M")
+
+
+_PROFILS = {"spraying": "password spraying", "force_brute": "force brute"}
+
+
+def expliquer_etape1(det: ResultatDetection, multi_jours: bool) -> str:
+    """Explication en français, destinée à un lecteur non technique."""
+    lignes = ["=== ÉTAPE 1 : DÉTECTION DES ATTAQUES PAR MOTS DE PASSE ==="]
+    lignes.append(
+        f"Recherche : les échecs de connexion (événement 4625), regroupés par adresse IP "
+        f"source. Une IP est signalée à partir de {SEUIL_ECHECS} échecs ; au moins "
+        f"{SEUIL_COMPTES} comptes visés indiquent un password spraying (un mot de passe "
+        f"courant testé sur beaucoup de comptes), moins indiquent une force brute.")
+    lignes.append(
+        f"Résultat : {det.nb_echecs_total} échecs de connexion analysés, venant de "
+        f"{det.nb_ip_analysees} adresse(s) IP ; {len(det.suspectes)} suspecte(s).")
+    for p in det.suspectes:
+        lignes.append(
+            f"  - {p.ip} : {p.nb_echecs} échecs, {len(p.comptes)} comptes, "
+            f"machine(s) visée(s) : {', '.join(p.hosts)}, de "
+            f"{formater_heure(p.debut, multi_jours)} à {formater_heure(p.fin, multi_jours)}"
+            f" -> profil {_PROFILS[p.categorie]}.")
+    for p in det.ecartees:
+        lignes.append(
+            f"  - Écartée : {p.ip} ({p.nb_echecs} échecs, compte(s) : "
+            f"{', '.join(p.comptes)}) -> {p.motif}.")
+    if det.nb_incoherences_result:
+        lignes.append(
+            f"Note : {det.nb_incoherences_result} de ces échecs portent pourtant "
+            f"result = \"success\" dans le journal ; cette incohérence est ignorée, "
+            f"l'identifiant d'événement 4625 fait foi.")
+    if det.suspectes:
+        lignes.append(
+            f"-> {len(det.suspectes)} IP suspecte(s) à examiner : l'étape 2 cherche si "
+            f"l'une d'elles a fini par se connecter avec succès.")
+    else:
+        lignes.append(
+            "-> Aucune IP ne dépasse les seuils : les étapes suivantes n'ont rien sur "
+            "quoi s'appuyer.")
+    return "\n".join(lignes)
