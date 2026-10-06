@@ -13,11 +13,14 @@ Le chemin des logs surcharge FICHIER_LOGS ; --enrichir active VirusTotal.
 Sorties : rapport texte, PDF, export MISP (CSV) et STIX (JSON).
 Les heures sont affichées en UTC.
 """
+import base64
+import binascii
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import ipaddress
 import json
+import ntpath
 
 # --- Paramètres -------------------------------------------------------------
 FICHIER_LOGS = "logs_test.json"
@@ -367,4 +370,173 @@ def expliquer_etape2(piv: ResultatPivot, multi_jours: bool) -> str:
         lignes.append(
             "-> Aucune connexion réussie : il n'y a pas d'activité à reconstituer ; "
             "ces tentatives sont à bloquer et surveiller.")
+    return "\n".join(lignes)
+
+
+# --- Étape 3 : chronologie --------------------------------------------------
+@dataclass
+class EvenementQualifie:
+    """Un événement du périmètre compromis, qualifié et décrit en français."""
+    evt: Evenement
+    nature: str  # connexion_initiale | connexion | mouvement_lateral | processus_suspect |
+    #              processus_benin | tache_planifiee | creation_compte | ajout_groupe |
+    #              ajout_groupe_privilegie | effacement_journal | autre
+    description: str
+    suspect: bool
+    commande_decodee: str | None = None
+
+
+@dataclass
+class Chronologie:
+    """Activité post-compromission pour une compromission."""
+    compromission: Compromission
+    evenements: list[EvenementQualifie]
+    comptes_suivis: list[str]   # compte compromis, puis comptes créés par l'attaquant
+
+
+_OPTIONS_ENCODEES = {"-enc", "-encodedcommand", "-e"}
+
+
+def decoder_commande(ligne: str) -> str | None:
+    """Décode l'argument encodé (-enc / -encodedcommand / -e) d'une ligne de commande.
+
+    None s'il n'y a pas de paramètre encodé ; "non décodable" si le décodage
+    base64 puis UTF-16LE échoue ou si l'argument manque.
+    """
+    mots = (ligne or "").split()
+    for i, mot in enumerate(mots):
+        if mot.lower() in _OPTIONS_ENCODEES:
+            if i + 1 >= len(mots):
+                return "non décodable"
+            try:
+                texte = base64.b64decode(mots[i + 1], validate=True).decode("utf-16-le")
+            except (binascii.Error, ValueError):  # UnicodeDecodeError est un ValueError
+                return "non décodable"
+            return texte.rstrip("\x00")
+    return None
+
+
+def _nom_processus(chemin) -> str:
+    """Nom de fichier en minuscules, quel que soit le style de chemin."""
+    return ntpath.basename(str(chemin or "").replace("/", "\\")).lower()
+
+
+def qualifier_evenement(e: Evenement, c: Compromission) -> EvenementQualifie:
+    """Qualifie un événement du périmètre de la compromission c."""
+    d = e.details
+    if e.event_id == EVT_SUCCES:
+        if e.timestamp == c.t0 and e.host == c.host and e.account == c.compte:
+            return EvenementQualifie(
+                e, "connexion_initiale",
+                f"connexion de {e.account} depuis {e.src_ip or 'IP inconnue'} "
+                f"(début de la compromission)", True)
+        if e.host != c.host:
+            return EvenementQualifie(
+                e, "mouvement_lateral",
+                f"connexion de {e.account} sur {e.host} depuis "
+                f"{e.src_ip or 'IP inconnue'} (mouvement latéral)", True)
+        return EvenementQualifie(
+            e, "connexion",
+            f"connexion de {e.account} depuis {e.src_ip or 'IP inconnue'}", False)
+    if e.event_id == EVT_PROCESSUS:
+        processus = _nom_processus(d.get("process"))
+        parent = _nom_processus(d.get("parent_process"))
+        ligne = str(d.get("command_line") or "")
+        ligne_min = ligne.lower()
+        office = parent in PARENTS_BUREAUTIQUES and processus in INTERPRETEURS
+        marqueur = any(m in ligne_min for m in MARQUEURS_CMD_SUSPECTS)
+        if office or marqueur:
+            decodee = decoder_commande(ligne)
+            motif = (f"lancé par {parent}" if office else "avec des options suspectes")
+            desc = f"{processus or 'processus inconnu'} {motif} (exécution suspecte) : {ligne}"
+            if decodee is not None:
+                desc += f" ; commande décodée : {decodee}"
+            return EvenementQualifie(e, "processus_suspect", desc, True, decodee)
+        return EvenementQualifie(
+            e, "processus_benin",
+            f"processus {processus or 'inconnu'} lancé par {parent or 'inconnu'} (sans anomalie)",
+            False)
+    if e.event_id == EVT_TACHE:
+        return EvenementQualifie(
+            e, "tache_planifiee",
+            f"tâche planifiée créée : {d.get('task_name') or 'nom inconnu'}", True)
+    if e.event_id == EVT_CREATION_COMPTE:
+        return EvenementQualifie(
+            e, "creation_compte",
+            f"compte local créé : {d.get('new_account') or 'nom inconnu'}", True)
+    if e.event_id == EVT_AJOUT_GROUPE:
+        groupe = str(d.get("group") or "groupe inconnu")
+        membre = d.get("member") or "membre inconnu"
+        if groupe.lower() in GROUPES_PRIVILEGIES:
+            return EvenementQualifie(
+                e, "ajout_groupe_privilegie",
+                f"{membre} ajouté au groupe {groupe} (groupe à privilèges)", True)
+        return EvenementQualifie(
+            e, "ajout_groupe", f"{membre} ajouté au groupe {groupe}", False)
+    if e.event_id == EVT_EFFACEMENT:
+        return EvenementQualifie(
+            e, "effacement_journal", "journal de sécurité effacé", True)
+    return EvenementQualifie(e, "autre", f"événement {e.event_id}", False)
+
+
+def etape3_chronologie(evts: list[Evenement], piv: ResultatPivot) -> list[Chronologie]:
+    """Reconstitue l'activité après chaque compromission.
+
+    Périmètre : événements (hors 4625) à partir de t0 sur la machine compromise,
+    ou faits par un compte suivi, ou ajoutant un compte suivi à un groupe. Un
+    compte créé (4720) dans le périmètre est suivi à son tour.
+    """
+    chronos = []
+    for c in piv.compromissions:
+        suivis = [c.compte]
+        retenus = []
+        for e in evts:  # trié chronologiquement
+            if e.timestamp < c.t0 or e.event_id == EVT_ECHEC:
+                continue
+            membre = e.details.get("member") if e.event_id == EVT_AJOUT_GROUPE else None
+            if e.host == c.host or e.account in suivis or membre in suivis:
+                retenus.append(qualifier_evenement(e, c))
+                if e.event_id == EVT_CREATION_COMPTE:
+                    nouveau = e.details.get("new_account")
+                    if nouveau and nouveau not in suivis:
+                        suivis.append(nouveau)
+        chronos.append(Chronologie(c, retenus, suivis))
+    return chronos
+
+
+def expliquer_etape3(chronos: list[Chronologie], multi_jours: bool) -> str:
+    """Explication en français, destinée à un lecteur non technique."""
+    lignes = ["=== ÉTAPE 3 : QUE FAIT L'ATTAQUANT APRÈS L'INTRUSION ? ==="]
+    if not chronos:
+        lignes.append(
+            "Recherche : l'activité des comptes compromis après leur première connexion.")
+        lignes.append("Résultat : aucune compromission à l'étape 2, donc aucune chronologie.")
+        lignes.append("-> Pas d'action de remédiation à planifier pour cette étape.")
+        return "\n".join(lignes)
+
+    for ch in chronos:
+        c = ch.compromission
+        crees = ch.comptes_suivis[1:]
+        comptes = ", ".join(ch.comptes_suivis)
+        lignes.append(
+            f"Recherche : sur {c.host}, tout ce qui s'est passé à partir de "
+            f"{formater_heure(c.t0, multi_jours)} (connexion de {c.compte}), "
+            f"{_pl(len(ch.comptes_suivis), 'compte suivi', 'comptes suivis')} : {comptes}.")
+        if crees:
+            lignes.append(
+                f"  Le périmètre a été étendu {'au compte créé' if len(crees) == 1 else 'aux comptes créés'} "
+                f"par l'attaquant : {', '.join(crees)} (ses actions sur d'autres machines "
+                f"sont aussi suivies).")
+        nb_susp = sum(1 for q in ch.evenements if q.suspect)
+        lignes.append(
+            f"Résultat : {_pl(len(ch.evenements), 'événement', 'événements')} dont "
+            f"{_pl(nb_susp, 'suspect', 'suspects')} (marqués [!]).")
+        for q in ch.evenements:
+            marque = "[!] " if q.suspect else "    "
+            lignes.append(
+                f"  {marque}{formater_heure(q.evt.timestamp, multi_jours)}  "
+                f"{q.evt.host}  {q.description}")
+    lignes.append(
+        "-> L'étape 4 transforme ces constats en plan d'action : isoler les machines, "
+        "désactiver les comptes, supprimer les tâches et retirer les droits obtenus.")
     return "\n".join(lignes)

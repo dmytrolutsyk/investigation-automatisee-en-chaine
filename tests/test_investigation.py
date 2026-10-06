@@ -5,9 +5,10 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from investigation import (ErreurChargement, Evenement, charger_logs, est_interne,
-                           etape1_detection, etape2_pivot, expliquer_etape1,
-                           expliquer_etape2, formater_heure)
-from tests.jeu_synthetique import (IP_BRUTE, IP_FP, IP_SPRAY_A, IP_SPRAY_B,
+                           decoder_commande, etape1_detection, etape2_pivot,
+                           etape3_chronologie, expliquer_etape1, expliquer_etape2,
+                           expliquer_etape3, formater_heure)
+from tests.jeu_synthetique import (B64_GET_PROCESS, IP_BRUTE, IP_FP, IP_SPRAY_A, IP_SPRAY_B,
                                    chemin_jeu_synthetique, construire_jeu, ecrire_jeu)
 
 
@@ -228,6 +229,82 @@ class TestEtape2(unittest.TestCase):
         evts = []
         piv = etape2_pivot(evts, etape1_detection(evts))
         self.assertIn("rien à pivoter", expliquer_etape2(piv, False))
+
+
+class TestEtape3(unittest.TestCase):
+    def _chronos(self, supplementaires=()):
+        chemin = ecrire_jeu(construire_jeu() + list(supplementaires))
+        self.addCleanup(os.remove, chemin)
+        evts = charger_logs(chemin)
+        piv = etape2_pivot(evts, etape1_detection(evts))
+        return etape3_chronologie(evts, piv)
+
+    @staticmethod
+    def _proc(ts, host, compte, process, parent, cmd=None):
+        return {"timestamp": ts, "event_id": 4688, "host": host, "account": compte,
+                "src_ip": None, "logon_type": None, "result": "success",
+                "details": {"process": process, "parent_process": parent,
+                            "command_line": cmd or process}}
+
+    def test_chronologie_synthetique(self):
+        chronos = self._chronos()
+        self.assertEqual(len(chronos), 1)
+        ch = chronos[0]
+        self.assertEqual([(q.evt.timestamp.strftime("%H:%M"), q.nature) for q in ch.evenements], [
+            ("09:12", "connexion_initiale"), ("09:14", "processus_suspect"),
+            ("09:16", "tache_planifiee"), ("09:18", "creation_compte"),
+            ("09:19", "ajout_groupe_privilegie"), ("09:25", "mouvement_lateral"),
+            ("09:27", "processus_suspect")])
+        self.assertEqual(ch.comptes_suivis, ["u.trois", "adm_tmp"])
+        self.assertEqual(ch.evenements[-1].commande_decodee, "Get-Process")
+
+    def test_activite_hors_perimetre_exclue(self):
+        # le 4688 chrome.exe de p.alpha sur WKS-101 (09:30) n'apparaît pas
+        ch = self._chronos()[0]
+        self.assertNotIn("WKS-101", [q.evt.host for q in ch.evenements])
+        self.assertNotIn("p.alpha", [q.evt.account for q in ch.evenements])
+
+    def test_processus_benin_sur_host(self):
+        ch = self._chronos([self._proc("2026-05-20T09:20:00Z", "SRV-FILE02", "u.trois",
+                                       "notepad.exe", "explorer.exe")])[0]
+        q = [x for x in ch.evenements if x.evt.timestamp.strftime("%H:%M") == "09:20"]
+        self.assertEqual(len(q), 1)
+        self.assertEqual(q[0].nature, "processus_benin")
+        self.assertFalse(q[0].suspect)
+
+    def test_processus_autre_compte_sur_host_et_chemin_complet(self):
+        ch = self._chronos([self._proc(
+            "2026-05-20T09:21:00Z", "SRV-FILE02", "autre",
+            "C:\\Windows\\System32\\CMD.exe", "C:\\Program Files\\EXCEL.EXE")])[0]
+        q = [x for x in ch.evenements if x.evt.timestamp.strftime("%H:%M") == "09:21"]
+        self.assertEqual(q[0].nature, "processus_suspect")
+
+    def test_effacement_journal(self):
+        ch = self._chronos([{"timestamp": "2026-05-20T09:40:00Z", "event_id": 1102,
+                             "host": "SRV-FILE02", "account": "u.trois", "src_ip": None,
+                             "logon_type": None, "result": "success", "details": {}}])[0]
+        self.assertEqual(ch.evenements[-1].nature, "effacement_journal")
+        self.assertTrue(ch.evenements[-1].suspect)
+        self.assertIn("journal de sécurité effacé", ch.evenements[-1].description)
+
+    def test_decoder_commande(self):
+        self.assertEqual(decoder_commande("powershell.exe -nop -w hidden -enc " + B64_GET_PROCESS),
+                         "Get-Process")
+        self.assertEqual(decoder_commande("powershell -EncodedCommand " + B64_GET_PROCESS),
+                         "Get-Process")
+        self.assertEqual(decoder_commande("powershell -enc %%%"), "non décodable")
+        self.assertEqual(decoder_commande("powershell -enc"), "non décodable")
+        self.assertIsNone(decoder_commande("chrome.exe"))
+
+    def test_explication(self):
+        t = expliquer_etape3(self._chronos(), False)
+        for attendu in ("=== ÉTAPE 3", "SRV-FILE02", "09:12", "excel.exe", "\\OneDriveSyncHelper",
+                        "adm_tmp", "Admins du domaine", "WKS-205", "Get-Process", "[!]",
+                        "créé par l'attaquant"):
+            self.assertIn(attendu, t)
+
+    def test_explication_vide(self):
+        self.assertIn("aucune compromission", expliquer_etape3([], False))
 
 
 if __name__ == "__main__":
