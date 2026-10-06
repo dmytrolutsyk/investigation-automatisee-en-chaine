@@ -1,0 +1,7 @@
+value,type,category,to_ids,comment
+203.0.113.47,ip-src,Network activity,1,"IP source du password spraying (37 échecs sur 14 comptes, 08:02–08:18)"
+j.martin,target-user,Targeting data,0,Compte compromis par 203.0.113.47 sur WKS-014 à 08:21
+WKS-014,target-machine,Targeting data,0,Machine compromise : connexion réussie de j.martin depuis 203.0.113.47 à 08:21
+powershell.exe -nop -w hidden -enc JABjAD0A,text,Payload installation,0,Ligne de commande suspecte exécutée par j.martin sur WKS-014 à 08:23
+\MicrosoftUpdateSync,text,Persistence mechanism,0,Tâche planifiée créée par j.martin sur WKS-014 à 08:25
+svc_backup,text,Persistence mechanism,0,Compte créé par l'attaquant sur WKS-014 à 08:27

@@ -1,0 +1,62 @@
+RAPPORT D'INVESTIGATION AUTOMATISÉE
+Fichier analysé : logs_test.json
+Événements analysés : 73 événements
+Période couverte : 12/03/2026 08:00 → 12/03/2026 08:40 UTC
+Toutes les heures du rapport sont exprimées en UTC.
+Gravité : CRITIQUE
+
+=== ÉTAPE 1 : DÉTECTION DES ATTAQUES PAR MOTS DE PASSE ===
+Recherche : les échecs de connexion (événement 4625), regroupés par adresse IP source. Une IP est signalée à partir de 10 échecs ; au moins 5 comptes visés indiquent un password spraying (un mot de passe courant testé sur beaucoup de comptes), moins indiquent une force brute.
+Résultat : 61 échecs de connexion analysés, venant de 3 adresses IP ; 1 suspecte.
+  - 203.0.113.47 : 37 échecs, 14 comptes, machines visées : SRV-DC01, WKS-003, WKS-007, WKS-011, WKS-014, WKS-022, de 08:02 à 08:18 -> profil password spraying.
+  - Écartée : 10.2.5.9 (23 échecs, compte : svc_sql) -> 23 échecs sur un seul compte depuis le réseau interne : probablement un compte de service dont le mot de passe a expiré.
+Note : 61 de ces échecs portent pourtant result = "success" dans le journal ; cette incohérence est ignorée, l'identifiant d'événement 4625 fait foi.
+-> 1 IP suspecte à examiner : l'étape 2 cherche si l'une d'elles a fini par se connecter avec succès.
+
+=== ÉTAPE 2 : L'ATTAQUE A-T-ELLE ABOUTI ? ===
+Recherche : pour chaque IP suspecte, les connexions réussies (événement 4624) survenues après son premier échec, c'est-à-dire un compte deviné par l'attaquant.
+Résultat : 1 compromission ; 0 IP suspecte sans connexion réussie.
+  - L'attaque depuis 203.0.113.47 a abouti : le compte j.martin s'est connecté à WKS-014 à 08:21, par accès réseau.
+-> L'étape 3 reconstitue l'activité sur la machine touchée : WKS-014 après 08:21.
+
+=== ÉTAPE 3 : QUE FAIT L'ATTAQUANT APRÈS L'INTRUSION ? ===
+Recherche : sur WKS-014, tout ce qui s'est passé à partir de 08:21 (connexion de j.martin), 2 comptes suivis : j.martin, svc_backup.
+  Le périmètre a été étendu au compte créé par l'attaquant : svc_backup (ses actions sur d'autres machines sont aussi suivies).
+Résultat : 6 événements dont 6 suspects (marqués [!]).
+  [!] 08:21  WKS-014  connexion de j.martin depuis 203.0.113.47 (début de la compromission)
+  [!] 08:23  WKS-014  powershell.exe lancé par winword.exe (exécution suspecte) : powershell.exe -nop -w hidden -enc JABjAD0A ; commande décodée : $c= (commande encodée, contenu masqué)
+  [!] 08:25  WKS-014  tâche planifiée créée : \MicrosoftUpdateSync
+  [!] 08:27  WKS-014  compte local créé : svc_backup
+  [!] 08:28  WKS-014  svc_backup ajouté au groupe Administrateurs (groupe à privilèges)
+  [!] 08:31  WKS-014  journal de sécurité effacé
+-> L'étape 4 transforme ces constats en plan d'action : isoler les machines, désactiver les comptes, supprimer les tâches et retirer les droits obtenus.
+
+=== ÉTAPE 4 : PLAN D'ACTION ET GRAVITÉ ===
+Recherche : à partir de 1 IP suspecte, 1 compromission et 6 événements post-intrusion, les mesures à prendre ; chaque action est rattachée au fait observé qui la justifie.
+Résultat : gravité CRITIQUE : l'attaquant a étendu son emprise (ajout de svc_backup au groupe Administrateurs, effacement du journal de sécurité de WKS-014) ; 10 actions proposées.
+  IMMÉDIAT :
+    - 203.0.113.47 a échoué 37 fois à se connecter entre 08:02 et 08:18 -> Bloquer l'IP 203.0.113.47 au pare-feu et au proxy
+    - Connexion de l'attaquant confirmée sur WKS-014 à 08:21 avec j.martin -> Isoler WKS-014 du réseau
+    - Connexion de l'attaquant confirmée sur WKS-014 à 08:21 avec j.martin -> Réinitialiser le mot de passe de j.martin et révoquer ses sessions (le déconnecter partout)
+    - Compte svc_backup créé sur WKS-014 à 08:27 par j.martin -> Désactiver le compte svc_backup
+    - svc_backup ajouté au groupe à privilèges Administrateurs sur WKS-014 à 08:28 -> Retirer svc_backup du groupe Administrateurs
+  COURT TERME :
+    - Commande suspecte exécutée sur WKS-014 à 08:23 par j.martin -> Collecter les preuves sur WKS-014 (mémoire, disque) et analyser la commande : $c=
+    - Tâche planifiée \MicrosoftUpdateSync créée sur WKS-014 à 08:25 -> Supprimer la tâche planifiée \MicrosoftUpdateSync sur WKS-014
+    - Journal de sécurité effacé sur WKS-014 à 08:31 par j.martin -> Traçabilité locale perdue sur WKS-014 : s'appuyer sur le SIEM (outil central de collecte des journaux) et les sauvegardes
+  SUIVI :
+    - 23 échecs de svc_sql depuis 10.2.5.9 (réseau interne) sur SRV-SQL01 -> Vérifier le mot de passe du compte de service svc_sql sur SRV-SQL01
+    - 203.0.113.47 a testé 14 comptes (password spraying) -> Revoir la robustesse des mots de passe des 14 comptes visés par 203.0.113.47
+-> L'étape 5 extrait les indicateurs de compromission (IP, comptes, tâches, commandes, empreintes) pour les partager et les enrichir.
+
+=== ÉTAPE 5 : IOC ET ENRICHISSEMENT ===
+Recherche : les indicateurs de compromission (IOC), c'est-à-dire les traces réutilisables pour détecter l'attaquant ailleurs, tirés des étapes précédentes : IP d'attaque (étape 1), comptes et machines compromis (étape 2), comptes créés, tâches planifiées, commandes suspectes et les empreintes, adresses web, domaines et IP qu'elles contiennent (étape 3).
+Résultat : 6 IOC : 1 ip-src (IP d'attaque), 1 target-user (compte compromis), 1 target-machine (machine touchée), 3 text (compte créé, tâche ou commande).
+  - 203.0.113.47  (ip-src)
+  - j.martin  (target-user)
+  - WKS-014  (target-machine)
+  - powershell.exe -nop -w hidden -enc JABjAD0A  (text)
+  - \MicrosoftUpdateSync  (text)
+  - svc_backup  (text)
+  Vérification VirusTotal : enrichissement non demandé (option --enrichir).
+-> IOC exportés dans iocs_misp.csv (import MISP) et iocs_stix.json (STIX 2.1, pour une plateforme de renseignement sur la menace).
