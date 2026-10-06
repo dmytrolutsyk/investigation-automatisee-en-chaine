@@ -3,6 +3,8 @@
 Module autonome (stdlib uniquement) : cache disque, limitation de débit,
 retry sur 429, arrêt propre sur clé refusée.
 """
+from __future__ import annotations
+
 import base64
 import ipaddress
 import json

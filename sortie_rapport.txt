@@ -14,9 +14,9 @@ Note : 61 de ces échecs portent pourtant result = "success" dans le journal ; c
 -> 1 IP suspecte à examiner : l'étape 2 cherche si l'une d'elles a fini par se connecter avec succès.
 
 === ÉTAPE 2 : L'ATTAQUE A-T-ELLE ABOUTI ? ===
-Recherche : pour chaque IP suspecte, les connexions réussies (événement 4624) survenues après son premier échec, c'est-à-dire un compte deviné par l'attaquant.
+Recherche : pour chaque IP suspecte, les connexions réussies (événement 4624) survenues après son premier échec : l'attaquant dispose alors d'un mot de passe valide.
 Résultat : 1 compromission ; 0 IP suspecte sans connexion réussie.
-  - L'attaque depuis 203.0.113.47 a abouti : le compte j.martin s'est connecté à WKS-014 à 08:21, par accès réseau.
+  - L'attaque depuis 203.0.113.47 a abouti : le compte j.martin s'est connecté à WKS-014 à 08:21, par accès réseau ; mot de passe probablement deviné par l'attaquant.
 -> L'étape 3 reconstitue l'activité sur la machine touchée : WKS-014 après 08:21.
 
 === ÉTAPE 3 : QUE FAIT L'ATTAQUANT APRÈS L'INTRUSION ? ===
@@ -51,12 +51,12 @@ Résultat : gravité CRITIQUE : l'attaquant a étendu son emprise (ajout de svc_
 
 === ÉTAPE 5 : IOC ET ENRICHISSEMENT ===
 Recherche : les indicateurs de compromission (IOC), c'est-à-dire les traces réutilisables pour détecter l'attaquant ailleurs, tirés des étapes précédentes : IP d'attaque (étape 1), comptes et machines compromis (étape 2), comptes créés, tâches planifiées, commandes suspectes et les empreintes, adresses web, domaines et IP qu'elles contiennent (étape 3).
-Résultat : 6 IOC : 1 ip-src (IP d'attaque), 1 target-user (compte compromis), 1 target-machine (machine touchée), 3 text (compte créé, tâche ou commande).
-  - 203.0.113.47  (ip-src)
-  - j.martin  (target-user)
-  - WKS-014  (target-machine)
-  - powershell.exe -nop -w hidden -enc JABjAD0A  (text)
-  - \MicrosoftUpdateSync  (text)
-  - svc_backup  (text)
+Résultat : 6 IOC : 1 IP d'attaque, 1 compte compromis, 1 machine touchée, 1 commande suspecte, 1 tâche planifiée, 1 compte créé.
+  - 203.0.113.47  (IP d'attaque)
+  - j.martin  (compte compromis)
+  - WKS-014  (machine touchée)
+  - powershell.exe -nop -w hidden -enc JABjAD0A  (commande suspecte)
+  - \MicrosoftUpdateSync  (tâche planifiée)
+  - svc_backup  (compte créé)
   Vérification VirusTotal : enrichissement non demandé (option --enrichir).
 -> IOC exportés dans iocs_misp.csv (import MISP) et iocs_stix.json (STIX 2.1, pour une plateforme de renseignement sur la menace).

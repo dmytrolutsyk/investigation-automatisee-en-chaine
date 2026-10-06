@@ -267,7 +267,7 @@ class TestEtape3(unittest.TestCase):
         self.assertNotIn("p.alpha", [q.evt.account for q in ch.evenements])
 
     def test_processus_benin_sur_host(self):
-        ch = self._chronos([self._proc("2026-05-20T09:20:00Z", "SRV-FILE02", "u.trois",
+        ch = self._chronos([self._proc("2026-05-20T09:20:00Z", "SRV-FILE02", "m.legit",
                                        "notepad.exe", "explorer.exe")])[0]
         q = [x for x in ch.evenements if x.evt.timestamp.strftime("%H:%M") == "09:20"]
         self.assertEqual(len(q), 1)
@@ -305,8 +305,8 @@ class TestEtape3(unittest.TestCase):
                         "créé par l'attaquant"):
             self.assertIn(attendu, t)
 
-    def _nature_proc(self, process, parent, cmd):
-        ch = self._chronos([self._proc("2026-05-20T09:22:00Z", "SRV-FILE02", "u.trois",
+    def _nature_proc(self, process, parent, cmd, compte="u.trois"):
+        ch = self._chronos([self._proc("2026-05-20T09:22:00Z", "SRV-FILE02", compte,
                                        process, parent, cmd)])[0]
         return [q for q in ch.evenements
                 if q.evt.timestamp.strftime("%H:%M") == "09:22"][0]
@@ -316,7 +316,8 @@ class TestEtape3(unittest.TestCase):
                 ("iexplore.exe", "C:\\Program Files\\Internet Explorer\\iexplore.exe"),
                 ("notepad.exe", "notepad.exe C:\\hidden\\a.txt"),
                 ("cmd.exe", "cmd.exe /c start -nopause")):
-            q = self._nature_proc(process, "explorer.exe", cmd)
+            # compte non suivi : seul l'éventuel marqueur rendrait l'événement suspect
+            q = self._nature_proc(process, "explorer.exe", cmd, compte="m.legit")
             self.assertEqual(q.nature, "processus_benin", cmd)
             self.assertFalse(q.suspect)
 
@@ -669,7 +670,8 @@ class TestEtape5(unittest.TestCase):
     def test_non_enrichi(self):
         t = expliquer_etape5(self.iocs(), None)
         self.assertTrue(t.startswith("=== ÉTAPE 5 : IOC ET ENRICHISSEMENT ==="))
-        for motif in ("Recherche :", "Résultat :", "->", "3 IOC", "ip-src", "domain", "text",
+        for motif in ("Recherche :", "Résultat :", "->", "3 IOC", "IP d'attaque", "domaine",
+                      "compte créé",
                       "enrichissement non demandé (option --enrichir)",
                       "iocs_misp.csv", "iocs_stix.json"):
             self.assertIn(motif, t)
@@ -695,6 +697,227 @@ class TestEtape5(unittest.TestCase):
         t = expliquer_etape5([], None)
         self.assertIn("aucun IOC", t)
         self.assertIn("->", t)
+
+
+
+# --- Corrections de la revue finale ------------------------------------------
+from investigation import _marqueurs_presents, qualifier_evenement
+
+B64_IEX = "SQBFAFgA"  # « IEX » en UTF-16LE
+
+
+def _brut(ts, event_id, host, compte, src_ip=None, logon_type=None, **details):
+    return {"timestamp": ts, "event_id": event_id, "host": host, "account": compte,
+            "src_ip": src_ip, "logon_type": logon_type, "result": "success",
+            "details": details}
+
+
+class TestRevueFinale(unittest.TestCase):
+    _chronos = TestEtape3._chronos
+    _proc = staticmethod(TestEtape3._proc)
+
+    def _etapes(self, supplementaires=()):
+        chemin = ecrire_jeu(construire_jeu() + list(supplementaires))
+        self.addCleanup(os.remove, chemin)
+        evts = charger_logs(chemin)
+        det = etape1_detection(evts)
+        piv = etape2_pivot(evts, det)
+        return evts, det, piv, etape3_chronologie(evts, piv)
+
+    @staticmethod
+    def _a(ch, hhmm):
+        return [q for q in ch.evenements if q.evt.timestamp.strftime("%H:%M") == hhmm]
+
+    # Finding 2 : options encodées abrégées
+    def test_options_encodees_abregees_decodees(self):
+        for option in ("-e", "-ec", "-enc", "-enco", "/enc", "-EncodedCommand", "-EC"):
+            ligne = f"powershell.exe -nop {option} {B64_GET_PROCESS}"
+            self.assertEqual(decoder_commande(ligne), "Get-Process", option)
+            self.assertTrue(_marqueurs_presents(f"powershell.exe {option} {B64_IEX}"), option)
+
+    def test_option_ec_seule_suspecte(self):
+        q = TestEtape3._nature_proc(self, "powershell.exe", "cmd.exe",
+                                    "powershell.exe -ec " + B64_IEX)
+        self.assertEqual(q.nature, "processus_suspect")
+        self.assertEqual(q.commande_decodee, "IEX")
+
+    def test_bypass_et_noprofile_abrege(self):
+        for ligne in ("powershell.exe -ExecutionPolicy Bypass -File a.ps1",
+                      "powershell.exe -NoProfile -File a.ps1",
+                      "powershell.exe -nopr -File a.ps1"):
+            self.assertTrue(_marqueurs_presents(ligne), ligne)
+
+    def test_pas_de_faux_positif_options(self):
+        for ligne in ("cmd.exe /c start -nopause", "xcopy.exe /e C:\\a D:\\b",
+                      "findstr.exe -e motif fichier.txt", "powershell.exe -no a.ps1",
+                      "powershell.exe -ExecutionPolicy RemoteSigned -File a.ps1"):
+            self.assertFalse(_marqueurs_presents(ligne), ligne)
+        self.assertIsNone(decoder_commande("xcopy.exe /e C:\\a D:\\b"))
+
+    # Finding 3 : commandes des comptes suivis
+    def test_commande_du_compte_compromis_suspecte(self):
+        *_, chronos = self._etapes([TestEtape3._proc(
+            "2026-05-20T09:20:00Z", "SRV-FILE02", "u.trois", "cmd.exe", "explorer.exe",
+            "cmd.exe /c whoami")])
+        q = self._a(chronos[0], "09:20")[0]
+        self.assertEqual(q.nature, "processus_suspect")
+        self.assertTrue(q.suspect)
+        self.assertIn("commande exécutée par le compte compromis u.trois "
+                      "(aucun marqueur connu)", q.description)
+
+    def test_commande_du_compte_cree_suspecte(self):
+        *_, chronos = self._etapes([TestEtape3._proc(
+            "2026-05-20T09:30:00Z", "WKS-205", "adm_tmp", "cmd.exe", "explorer.exe",
+            "cmd.exe /c whoami")])
+        q = self._a(chronos[0], "09:30")[0]
+        self.assertTrue(q.suspect)
+        self.assertIn("par le compte créé par l'attaquant adm_tmp", q.description)
+
+    def test_commande_autre_compte_neutre(self):
+        *_, chronos = self._etapes([TestEtape3._proc(
+            "2026-05-20T09:20:00Z", "SRV-FILE02", "m.legit", "notepad.exe", "explorer.exe")])
+        q = self._a(chronos[0], "09:20")[0]
+        self.assertEqual(q.nature, "processus_benin")
+        self.assertFalse(q.suspect)
+        self.assertIn("aucun marqueur suspect", q.description)
+        self.assertNotIn("sans anomalie", q.description)
+
+    def test_qualifier_evenement_compatible(self):
+        evts, det, piv, _ = self._etapes()
+        c = piv.compromissions[0]
+        e = Evenement(c.t0, 4688, c.host, "autre", None, None, "",
+                      {"process": "notepad.exe", "parent_process": "explorer.exe"})
+        self.assertEqual(qualifier_evenement(e, c).nature, "processus_benin")
+
+    def test_plan_commande_sans_marqueur(self):
+        evts, det, piv, chronos = self._etapes([
+            TestEtape3._proc("2026-05-20T09:20:00Z", "SRV-FILE02", "u.trois", "cmd.exe",
+                             "explorer.exe", "cmd.exe /c whoami"),
+            TestEtape3._proc("2026-05-20T09:21:00Z", "SRV-FILE02", "u.trois", "cmd.exe",
+                             "explorer.exe", "cmd.exe /c ipconfig")])
+        actions = [a for a in etape4_plan(det, piv, chronos)
+                   if "u.trois" in a.action and "Collecter" in a.action]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].priorite, "COURT TERME")
+        self.assertIn("SRV-FILE02", actions[0].action)
+
+    # Finding 4 : connexion interactive sur une autre machine
+    def test_connexion_interactive_a_verifier(self):
+        evts, det, piv, chronos = self._etapes([
+            _brut("2026-05-20T18:05:00Z", 4624, "LAP-007", "u.trois", "10.8.3.3", 2)])
+        q = self._a(chronos[0], "18:05")[0]
+        self.assertEqual(q.nature, "connexion_a_verifier")
+        self.assertTrue(q.suspect)
+        self.assertIn("connexion interactive du compte compromis u.trois sur LAP-007 : "
+                      "à vérifier (poste habituel de l'utilisateur ?)", q.description)
+        actions = etape4_plan(det, piv, chronos)
+        self.assertFalse(any("Isoler LAP-007" in a.action for a in actions))
+        verif = [a for a in actions
+                 if a.action == "Vérifier auprès de l'utilisateur la connexion sur LAP-007 à 18:05"]
+        self.assertEqual([a.priorite for a in verif], ["COURT TERME"])
+        from iocs import extraire_iocs
+        self.assertNotIn(("target-machine", "LAP-007"),
+                         {(i.type_misp, i.valeur) for i in extraire_iocs(det, piv, chronos)})
+
+    def test_gravite_connexion_a_verifier_seule(self):
+        # sans les faits graves du jeu, la seule connexion interactive ne rend pas CRITIQUE
+        evts, det, piv, chronos = self._etapes([
+            _brut("2026-05-20T18:05:00Z", 4624, "LAP-007", "u.trois", "10.8.3.3", 2)])
+        for ch in chronos:
+            ch.evenements = [q for q in ch.evenements if q.nature == "connexion_a_verifier"]
+        self.assertEqual(evaluer_gravite(piv, chronos), "ÉLEVÉE")
+
+    def test_connexion_reseau_et_type_inconnu_laterales(self):
+        *_, chronos = self._etapes([
+            _brut("2026-05-20T18:05:00Z", 4624, "SRV-X1", "u.trois", "10.8.3.3", 3),
+            _brut("2026-05-20T18:06:00Z", 4624, "SRV-X2", "u.trois", "10.8.3.3", None)])
+        self.assertEqual(self._a(chronos[0], "18:05")[0].nature, "mouvement_lateral")
+        self.assertEqual(self._a(chronos[0], "18:06")[0].nature, "mouvement_lateral")
+
+    # Finding 5 : formulation de l'étape 2
+    def test_etape2_compte_vise_ou_non(self):
+        _, _, piv, _ = self._etapes([
+            TestEtape2._succes("2026-05-20T09:13:00Z", "SRV-APP9", "admin.local", IP_SPRAY_A)])
+        t = expliquer_etape2(piv, False)
+        self.assertNotIn("un compte deviné par l'attaquant", t)
+        self.assertIn("probablement deviné", t)
+        self.assertIn("compte qui ne figurait pas parmi les comptes visés par les échecs", t)
+
+    # Finding 6 et 7 : échecs sans IP, accords
+    def test_echecs_sans_ip_comptes_et_mentionnes(self):
+        chemin = ecrire_tmp([
+            {"timestamp": "2026-05-20T10:00:00Z", "event_id": 4625, "src_ip": v,
+             "account": "a"} for v in (None, "", "-", "  ")]
+            + [{"timestamp": "2026-05-20T10:00:00Z", "event_id": 4624, "src_ip": " - "}])
+        self.addCleanup(os.remove, chemin)
+        evts = charger_logs(chemin)
+        self.assertEqual([e.src_ip for e in evts], [None] * 5)
+        det = etape1_detection(evts)
+        self.assertEqual(det.nb_echecs_sans_ip, 4)
+        self.assertIn("4 échecs sans IP source, non attribuables",
+                      expliquer_etape1(det, False))
+        self.assertNotIn("sans IP source", expliquer_etape1(etape1_detection([]), False))
+
+    def test_accord_nombre_echecs(self):
+        self.assertIn("Résultat : 0 échec de connexion analysé,",
+                      expliquer_etape1(etape1_detection([]), False))
+        un = [Evenement(datetime(2026, 5, 20, tzinfo=timezone.utc), 4625, "H", "a",
+                        "198.51.100.9", 3, "", {})]
+        self.assertIn("1 échec de connexion analysé,", expliquer_etape1(etape1_detection(un), False))
+
+    # Finding 10 : nouvelle connexion depuis l'IP d'attaque
+    def test_nouvelle_connexion_depuis_ip_attaque(self):
+        *_, chronos = self._etapes([
+            TestEtape2._succes("2026-05-20T09:40:00Z", "SRV-FILE02", "u.trois", IP_SPRAY_A)])
+        q = self._a(chronos[0], "09:40")[0]
+        self.assertTrue(q.suspect)
+        self.assertIn(f"nouvelle connexion de u.trois depuis l'IP d'attaque {IP_SPRAY_A}",
+                      q.description)
+
+    # Finding 11 : libellés français à l'étape 5
+    def test_etape5_libelles_francais(self):
+        iocs = [IOC("198.51.100.23", "ip-src", "Network activity", True, "IP",
+                    role="ip_attaque"),
+                IOC("adm_tmp", "text", "Persistence mechanism", False, "c", role="compte_cree"),
+                IOC("u.trois", "target-user", "Targeting data", False, "c",
+                    role="compte_compromis")]
+        t = expliquer_etape5(iocs, None)
+        self.assertIn("  - adm_tmp  (compte créé)", t)
+        self.assertIn("  - u.trois  (compte compromis)", t)
+        self.assertIn("1 IP d'attaque, 1 compte créé, 1 compte compromis.", t)
+        iocs.append(IOC("v.deux", "target-user", "Targeting data", False, "c",
+                        role="compte_compromis"))
+        self.assertIn("2 comptes compromis", expliquer_etape5(iocs, None))
+        for brut in ("(text)", "(target-user)", "(ip-src)", " text ", "ip-src"):
+            self.assertNotIn(brut, t)
+
+    # Finding 12 : en-tête du module
+    def test_docstring_module(self):
+        import investigation
+        doc = investigation.__doc__
+        self.assertNotIn("rebond latéral", doc)
+        for attendu in ("1.", "2.", "3.", "4.", "5.", "python3 investigation.py",
+                        "--enrichir", "Paramètres"):
+            self.assertIn(attendu, doc)
+
+
+class TestRevueFinaleBoutEnBout(_DossierTemporaire):
+    def test_investiguer_transmet_est_interne_et_multi_jours(self):
+        import investigation
+        with mock.patch.object(investigation, "extraire_iocs", return_value=[]) as m:
+            investiguer(self.jeu())
+        self.assertIs(m.call_args.kwargs["est_interne"], investigation.est_interne)
+        self.assertIs(m.call_args.kwargs["multi_jours"], False)
+
+    def test_utilisateur_legitime_sans_ioc_reseau(self):
+        legit = _brut("2026-05-20T09:35:00Z", 4688, "SRV-FILE02", "m.legit",
+                      process="chrome.exe", parent_process="explorer.exe",
+                      command_line="chrome.exe https://intranet.exemple.fr/rh 10.0.5.5")
+        inv = investiguer(self.jeu(construire_jeu() + [legit]))
+        valeurs = {i.valeur for i in inv.iocs}
+        for v in ("https://intranet.exemple.fr/rh", "intranet.exemple.fr", "10.0.5.5"):
+            self.assertNotIn(v, valeurs)
+        self.assertIn("http://evil.example.net/p.exe", valeurs)
 
 
 if __name__ == "__main__":

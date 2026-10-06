@@ -3,6 +3,8 @@
 Ce module ne dépend pas d'`investigation` : les résultats des étapes 1 à 3
 sont consommés par duck typing.
 """
+from __future__ import annotations
+
 import csv
 import ipaddress
 import json
@@ -11,6 +13,7 @@ import uuid
 from urllib.parse import urlsplit
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Callable
 
 EXTENSIONS_FICHIERS = {"exe", "dll", "ps1", "bat", "cmd", "vbs", "js", "hta", "txt", "dat",
                        "tmp", "log", "lnk", "zip", "msi", "doc", "docx", "xls", "xlsx",
@@ -111,19 +114,39 @@ def _pl(n: int, sing: str, plur: str) -> str:
     return sing if n == 1 else plur
 
 
-def _commentaire_ip(p) -> str:
+def _commentaire_ip(p, multi_jours: bool = False) -> str:
     libelle = {"spraying": "du password spraying", "force_brute": "de la force brute"}.get(
         p.categorie, "d'une activité d'échecs d'authentification")
     n = p.nb_echecs
     c = len(p.comptes)
     fin = getattr(p, "fin", None) or p.debut
-    jour = fin.date() != p.debut.date()
+    jour = multi_jours or fin.date() != p.debut.date()
     return (f"IP source {libelle} ({n} {_pl(n, 'échec', 'échecs')} sur "
             f"{c} {_pl(c, 'compte', 'comptes')}, {_hm(p.debut, jour)}–{_hm(fin, jour)})")
 
 
-def extraire_iocs(det, piv, chronos) -> list[IOC]:
-    """Construit la liste dédoublonnée (type_misp, valeur) des IOC, premier commentaire gardé."""
+RESEAUX_PRIVES = [ipaddress.ip_network(r)
+                  for r in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+
+
+def _est_prive(ip: str) -> bool:
+    """Vérification RFC 1918 par défaut (l'appelant peut fournir la sienne)."""
+    try:
+        adresse = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(adresse in r for r in RESEAUX_PRIVES if adresse.version == r.version)
+
+
+def extraire_iocs(det, piv, chronos, est_interne: Callable[[str], bool] | None = None,
+                  multi_jours: bool = False) -> list[IOC]:
+    """Construit la liste dédoublonnée (type_misp, valeur) des IOC, premier commentaire gardé.
+
+    Les motifs réseau et empreintes ne sont cherchés que dans les événements
+    suspects ; une IP interne (est_interne, RFC 1918 par défaut) n'est jamais
+    publiée comme IP de destination. multi_jours : dates dans les commentaires.
+    """
+    est_interne = est_interne or _est_prive
     iocs: list[IOC] = []
     vus: set[tuple[str, str]] = set()
 
@@ -136,20 +159,21 @@ def extraire_iocs(det, piv, chronos) -> list[IOC]:
         iocs.append(IOC(valeur, type_misp, categorie, to_ids, commentaire, role=role))
 
     for p in det.suspectes:
-        ajouter(p.ip, "ip-src", "Network activity", True, _commentaire_ip(p), "ip_attaque")
+        ajouter(p.ip, "ip-src", "Network activity", True, _commentaire_ip(p, multi_jours), "ip_attaque")
 
     for c in piv.compromissions:
         ajouter(c.compte, "target-user", "Targeting data", False,
-                f"Compte compromis par {c.ip} sur {c.host} à {_hm(c.t0)}", "compte_compromis")
+                f"Compte compromis par {c.ip} sur {c.host} à {_hm(c.t0, multi_jours)}",
+                "compte_compromis")
         ajouter(c.host, "target-machine", "Targeting data", False,
                 f"Machine compromise : connexion réussie de {c.compte} depuis {c.ip} "
-                f"à {_hm(c.t0)}", "machine")
+                f"à {_hm(c.t0, multi_jours)}", "machine")
 
     for ch in chronos:
         for q in ch.evenements:
             e = q.evt
             d = e.details
-            heure = _hm(e.timestamp)
+            heure = _hm(e.timestamp, multi_jours)
             if q.nature == "mouvement_lateral":
                 ajouter(e.host, "target-machine", "Targeting data", False,
                         f"Machine touchée par mouvement latéral : connexion de {e.account} "
@@ -167,7 +191,10 @@ def extraire_iocs(det, piv, chronos) -> list[IOC]:
                             f"Ligne de commande suspecte exécutée par {e.account} sur "
                             f"{e.host} à {heure}", "commande")
 
-            # Motifs : valeurs texte de details + commande décodée.
+            # Motifs : valeurs texte de details + commande décodée, pour les seuls
+            # événements suspects (pas l'activité normale d'autres utilisateurs).
+            if not getattr(q, "suspect", False):
+                continue
             sources = [(k, v) for k, v in d.items() if isinstance(v, str)]
             if q.commande_decodee and q.commande_decodee != ABSENT:
                 sources.append(("commande décodée", q.commande_decodee))
@@ -181,6 +208,8 @@ def extraire_iocs(det, piv, chronos) -> list[IOC]:
                         ajouter(valeur, type_misp, "Payload delivery", True,
                                 f"Empreinte {type_misp.upper()} observée dans {lieu}", "hash")
                     else:
+                        if type_misp == "ip-dst" and est_interne(valeur):
+                            continue
                         nom = {"url": "URL", "domain": "Domaine", "ip-dst": "IP de destination"}[type_misp]
                         ajouter(valeur, type_misp, "Network activity", True,
                                 f"{nom} observé(e) dans {lieu}", "reseau")

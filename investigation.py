@@ -1,18 +1,30 @@
-"""Investigation chaînée automatisée de logs de sécurité Windows.
+"""Investigation chaînée automatisée de logs de sécurité Windows (exercice ForCERT).
+
+But : partir d'un fichier JSON de journaux Windows et reconstituer un incident
+de bout en bout, chaque étape s'appuyant sur les conclusions de la précédente :
+    1. détection : IP à rafales d'échecs de connexion (4625), classées en
+       password spraying, force brute ou faux positif interne ;
+    2. pivot : connexions réussies (4624) depuis ces IP, donc comptes et
+       machines compromis ;
+    3. chronologie : activité après l'intrusion sur la machine compromise et
+       par les comptes suivis (compte compromis, comptes créés par l'attaquant) ;
+    4. plan d'action et gravité : chaque mesure est rattachée au fait observé ;
+    5. IOC : extraction, enrichissement VirusTotal optionnel, exports MISP/STIX.
 
 Usage :
-    python3 investigation.py [chemin_logs.json] [--enrichir]
+    python3 investigation.py [logs.json] [--enrichir]
+    (défaut : FICHIER_LOGS ; --enrichir interroge VirusTotal, clé dans VT_API_KEY)
 
-Le chemin des logs surcharge FICHIER_LOGS ; --enrichir active VirusTotal.
+Sorties (dossier courant) : rapport texte (affiché et sortie_rapport.txt),
+rapport_incident.pdf, iocs_misp.csv (MISP) et iocs_stix.json (STIX 2.1).
+Toutes les heures sont en UTC. Python 3.11 ou plus récent.
 
-Étapes (chaque conclusion alimente la suivante) :
-    1. détection des IP à échecs d'authentification (4625) en rafale ;
-    2. recherche des connexions réussies (4624) depuis ces IP ;
-    3. activité post-compromission des comptes touchés ;
-    4. rebond latéral via les comptes créés ou les nouvelles connexions.
-Sorties : rapport texte, PDF, export MISP (CSV) et STIX (JSON).
-Les heures sont affichées en UTC.
+Paramètres : seuils, réseaux internes, marqueurs de commandes suspectes,
+fichiers de sortie et réglages VirusTotal sont regroupés juste en dessous,
+dans la section « Paramètres ».
 """
+from __future__ import annotations
+
 import argparse
 import base64
 import binascii
@@ -48,8 +60,15 @@ PARENTS_BUREAUTIQUES = {"winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe
                         "msaccess.exe", "mspub.exe", "onenote.exe"}
 INTERPRETEURS = {"powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe",
                  "cscript.exe", "mshta.exe", "rundll32.exe", "regsvr32.exe"}
-MARQUEURS_CMD_SUSPECTS = ("-enc", "-encodedcommand", "-nop", "hidden",
-                          "downloadstring", "iex")
+# Mots entiers suspects dans les arguments d'une commande (comparaison en minuscules)
+MARQUEURS_CMD_SUSPECTS = ("hidden", "downloadstring", "iex", "bypass")
+# Options PowerShell : tout préfixe non ambigu est accepté (-e, -enc, /enc...)
+OPTION_ENCODEE = "-encodedcommand"        # dès 2 caractères (-e), plus l'alias -ec
+OPTION_SANS_PROFIL = "-noprofile"         # dès 4 caractères (-nop) ; -nopause n'en est pas un
+EXECUTABLES_POWERSHELL = {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+# Types de connexion locaux (interactive, service, déverrouillage, interactive en
+# cache) : sur une autre machine, à vérifier plutôt que mouvement latéral
+TYPES_CONNEXION_LOCALE = {2, 5, 7, 11}
 # Comparaison en minuscules
 GROUPES_PRIVILEGIES = {"administrateurs", "administrators", "admins du domaine",
                        "domain admins", "administrateurs de l'entreprise",
@@ -104,6 +123,14 @@ def _entier(valeur, defaut):
         return defaut
 
 
+def _ip_source(valeur) -> str | None:
+    """IP source normalisée ; vide, blanc ou « - » (IP nulle de Windows) donnent None."""
+    if valeur is None:
+        return None
+    texte = str(valeur).strip()
+    return None if texte in ("", "-") else texte
+
+
 def charger_logs(chemin: str) -> list[Evenement]:
     """Charge le fichier JSON de logs et renvoie les événements triés par date.
 
@@ -137,7 +164,7 @@ def charger_logs(chemin: str) -> list[Evenement]:
             event_id=_entier(obj.get("event_id"), 0),
             host=obj.get("host") or "",
             account=obj.get("account") or "",
-            src_ip=obj.get("src_ip") or None,
+            src_ip=_ip_source(obj.get("src_ip")),
             logon_type=_entier(obj.get("logon_type"), None),
             result=obj.get("result") or "",
             details=details if isinstance(details, dict) else {},
@@ -169,6 +196,7 @@ class ResultatDetection:
     nb_incoherences_result: int  # 4625 dont le champ result vaut "success"
     seuil_echecs: int = SEUIL_ECHECS    # seuils réellement appliqués
     seuil_comptes: int = SEUIL_COMPTES
+    nb_echecs_sans_ip: int = 0   # 4625 sans IP source, non attribuables
 
 
 _RESEAUX = [ipaddress.ip_network(r) for r in RESEAUX_INTERNES]
@@ -220,8 +248,12 @@ def etape1_detection(evts: list[Evenement], seuil_echecs: int = SEUIL_ECHECS,
     par_ip = defaultdict(list)
     incoherences = 0
     total = 0
+    sans_ip = 0
     for e in evts:
-        if e.event_id != EVT_ECHEC or not e.src_ip:
+        if e.event_id != EVT_ECHEC:
+            continue
+        if not e.src_ip:
+            sans_ip += 1
             continue
         total += 1
         par_ip[e.src_ip].append(e)
@@ -246,7 +278,7 @@ def etape1_detection(evts: list[Evenement], seuil_echecs: int = SEUIL_ECHECS,
     suspectes.sort(key=lambda p: p.debut)
     ecartees.sort(key=lambda p: p.debut)
     return ResultatDetection(suspectes, ecartees, total, len(par_ip), incoherences,
-                             seuil_echecs, seuil_comptes)
+                             seuil_echecs, seuil_comptes, sans_ip)
 
 
 def formater_heure(dt: datetime, multi_jours: bool) -> str:
@@ -266,9 +298,12 @@ def expliquer_etape1(det: ResultatDetection, multi_jours: bool) -> str:
         f"{det.seuil_comptes} comptes visés indiquent un password spraying (un mot de passe "
         f"courant testé sur beaucoup de comptes), moins indiquent une force brute.")
     lignes.append(
-        f"Résultat : {det.nb_echecs_total} échecs de connexion analysés, venant de "
-        f"{_pl(det.nb_ip_analysees, 'adresse IP', 'adresses IP')} ; "
-        f"{_pl(len(det.suspectes), 'suspecte', 'suspectes')}.")
+        f"Résultat : {_pl(det.nb_echecs_total, 'échec de connexion analysé', 'échecs de connexion analysés')}, "
+        f"venant de {_pl(det.nb_ip_analysees, 'adresse IP', 'adresses IP')} ; "
+        f"{_pl(len(det.suspectes), 'suspecte', 'suspectes')}"
+        + (f" ; {_pl(det.nb_echecs_sans_ip, 'échec', 'échecs')} sans IP source, "
+           f"non attribuable{'' if det.nb_echecs_sans_ip == 1 else 's'}"
+           if det.nb_echecs_sans_ip else "") + ".")
     for p in det.suspectes:
         lignes.append(
             f"  - {p.ip} : {p.nb_echecs} échecs, {_pl(len(p.comptes), 'compte', 'comptes')}, "
@@ -353,15 +388,18 @@ def expliquer_etape2(piv: ResultatPivot, multi_jours: bool) -> str:
 
     lignes.append(
         "Recherche : pour chaque IP suspecte, les connexions réussies (événement 4624) "
-        "survenues après son premier échec, c'est-à-dire un compte deviné par l'attaquant.")
+        "survenues après son premier échec : l'attaquant dispose alors d'un mot de passe valide.")
     lignes.append(
         f"Résultat : {_pl(len(piv.compromissions), 'compromission', 'compromissions')} "
         f"; {_pl(len(piv.non_abouties), 'IP suspecte', 'IP suspectes')} sans connexion réussie.")
     for c in piv.compromissions:
         mode = _TYPES_CONNEXION.get(c.logon_type, "de type inconnu")
+        origine = ("mot de passe probablement deviné par l'attaquant"
+                   if c.compte in c.profil.comptes else
+                   "compte qui ne figurait pas parmi les comptes visés par les échecs")
         lignes.append(
             f"  - L'attaque depuis {c.ip} a abouti : le compte {c.compte} s'est connecté à "
-            f"{c.host} à {formater_heure(c.t0, multi_jours)}, {mode}.")
+            f"{c.host} à {formater_heure(c.t0, multi_jours)}, {mode} ; {origine}.")
     for p in piv.non_abouties:
         lignes.append(
             f"  - L'attaque depuis {p.ip} n'a pas abouti : aucune connexion réussie "
@@ -385,12 +423,13 @@ def expliquer_etape2(piv: ResultatPivot, multi_jours: bool) -> str:
 class EvenementQualifie:
     """Un événement du périmètre compromis, qualifié et décrit en français."""
     evt: Evenement
-    nature: str  # connexion_initiale | connexion | mouvement_lateral | processus_suspect |
-    #              processus_benin | tache_planifiee | creation_compte | ajout_groupe |
-    #              ajout_groupe_privilegie | effacement_journal | autre
+    nature: str  # connexion_initiale | connexion | mouvement_lateral | connexion_a_verifier |
+    #              processus_suspect | processus_benin | tache_planifiee | creation_compte |
+    #              ajout_groupe | ajout_groupe_privilegie | effacement_journal | autre
     description: str
     suspect: bool
     commande_decodee: str | None = None
+    sans_marqueur: bool = False   # commande d'un compte suivi, sans marqueur connu
 
 
 @dataclass
@@ -401,18 +440,47 @@ class Chronologie:
     comptes_suivis: list[str]   # compte compromis, puis comptes créés par l'attaquant
 
 
-_OPTIONS_ENCODEES = {"-enc", "-encodedcommand", "-e"}
+def _option(jeton: str) -> str:
+    """Option en minuscules, « /x » ramené à « -x » (PowerShell accepte les deux)."""
+    jeton = jeton.lower()
+    return "-" + jeton[1:] if jeton.startswith("/") else jeton
 
 
-def decoder_commande(ligne: str) -> str | None:
-    """Décode l'argument encodé (-enc / -encodedcommand / -e) d'une ligne de commande.
+def _est_option_encodee(jeton: str) -> bool:
+    """-ec, ou tout préfixe d'au moins 2 caractères de -EncodedCommand (-e, -enc...)."""
+    t = _option(jeton)
+    return t == "-ec" or (len(t) >= 2 and OPTION_ENCODEE.startswith(t))
 
-    None s'il n'y a pas de paramètre encodé ; "non décodable" si le décodage
-    base64 puis UTF-16LE échoue ou si l'argument manque.
+
+def _est_option_sans_profil(jeton: str) -> bool:
+    """Préfixe d'au moins 4 caractères de -NoProfile (-nop, -nopr...)."""
+    t = _option(jeton)
+    return len(t) >= 4 and OPTION_SANS_PROFIL.startswith(t)
+
+
+def _contexte_powershell(ligne: str, processus: str = "") -> bool:
+    """Vrai si le processus ou un mot de la ligne est PowerShell.
+
+    Les options abrégées (-e, /e...) ne sont lues qu'en contexte PowerShell :
+    ailleurs, « xcopy /e » ou « findstr -e » sont des usages courants.
     """
+    if _nom_processus(processus) in EXECUTABLES_POWERSHELL:
+        return True
+    return any(_nom_processus(m.strip('"')) in EXECUTABLES_POWERSHELL
+               for m in (ligne or "").split())
+
+
+def decoder_commande(ligne: str, processus: str = "") -> str | None:
+    """Décode l'argument de -EncodedCommand (ou d'une abréviation : -e, -ec, -enc, /enc...).
+
+    None s'il n'y a pas de paramètre encodé ou hors contexte PowerShell ;
+    "non décodable" si le décodage base64 puis UTF-16LE échoue ou si l'argument manque.
+    """
+    if not _contexte_powershell(ligne, processus):
+        return None
     mots = (ligne or "").split()
     for i, mot in enumerate(mots):
-        if mot.lower() in _OPTIONS_ENCODEES:
+        if _est_option_encodee(mot):
             if i + 1 >= len(mots):
                 return "non décodable"
             try:
@@ -432,21 +500,38 @@ _SEPARATEURS = re.compile(r"[\s(),;'\"{}|=.]+")
 _EXTENSIONS_EXE = (".exe", ".com", ".bat", ".cmd")
 
 
-def _marqueurs_presents(ligne: str) -> bool:
+def _marqueurs_presents(ligne: str, processus: str = "") -> bool:
     """Vrai si un marqueur suspect figure comme mot entier parmi les arguments.
 
     L'exécutable (premier mot) est ignoré : iexplore.exe ou un chemin contenant
-    « hidden » ne comptent pas, pas plus que -nopause pour -nop.
+    « hidden » ne comptent pas, pas plus que -nopause pour -nop. Les options
+    PowerShell abrégées (-ec, -enc, /e, -nop...) ne comptent qu'en contexte PowerShell.
     """
+    powershell = _contexte_powershell(ligne, processus)
     mots = ligne.split(None, 1)
     if mots and mots[0].lower().strip('"').endswith(_EXTENSIONS_EXE):
         ligne = mots[1] if len(mots) > 1 else ""
     jetons = {j for j in _SEPARATEURS.split(ligne.lower()) if j}
-    return any(m in jetons for m in MARQUEURS_CMD_SUSPECTS)
+    if any(m in jetons for m in MARQUEURS_CMD_SUSPECTS):
+        return True
+    return powershell and any(_est_option_encodee(j) or _est_option_sans_profil(j)
+                              for j in jetons)
 
 
-def qualifier_evenement(e: Evenement, c: Compromission) -> EvenementQualifie:
-    """Qualifie un événement du périmètre de la compromission c."""
+def _compte_suivi(compte: str, c: Compromission) -> str:
+    """« le compte compromis X » ou « le compte créé par l'attaquant X »."""
+    if compte == c.compte:
+        return f"le compte compromis {compte}"
+    return f"le compte créé par l'attaquant {compte}"
+
+
+def qualifier_evenement(e: Evenement, c: Compromission,
+                        suivis: list[str] | None = None) -> EvenementQualifie:
+    """Qualifie un événement du périmètre de la compromission c.
+
+    suivis : comptes suivis à ce stade (par défaut, le seul compte compromis).
+    """
+    suivis = [c.compte] if suivis is None else suivis
     d = e.details
     if e.event_id == EVT_SUCCES:
         if e.timestamp == c.t0 and e.host == c.host and e.account == c.compte:
@@ -455,10 +540,20 @@ def qualifier_evenement(e: Evenement, c: Compromission) -> EvenementQualifie:
                 f"connexion de {e.account} depuis {e.src_ip or 'IP inconnue'} "
                 f"(début de la compromission)", True)
         if e.host != c.host:
+            if e.logon_type in TYPES_CONNEXION_LOCALE:
+                compte = _compte_suivi(e.account, c).replace("le compte", "du compte", 1)
+                return EvenementQualifie(
+                    e, "connexion_a_verifier",
+                    f"connexion interactive {compte} sur {e.host} : à vérifier "
+                    f"(poste habituel de l'utilisateur ?)", True)
             return EvenementQualifie(
                 e, "mouvement_lateral",
                 f"connexion de {e.account} sur {e.host} depuis "
                 f"{e.src_ip or 'IP inconnue'} (mouvement latéral)", True)
+        if e.src_ip and e.src_ip == c.ip:
+            return EvenementQualifie(
+                e, "connexion",
+                f"nouvelle connexion de {e.account} depuis l'IP d'attaque {e.src_ip}", True)
         return EvenementQualifie(
             e, "connexion",
             f"connexion de {e.account} depuis {e.src_ip or 'IP inconnue'}", False)
@@ -467,9 +562,9 @@ def qualifier_evenement(e: Evenement, c: Compromission) -> EvenementQualifie:
         parent = _nom_processus(d.get("parent_process"))
         ligne = str(d.get("command_line") or "")
         office = parent in PARENTS_BUREAUTIQUES and processus in INTERPRETEURS
-        marqueur = _marqueurs_presents(ligne)
+        marqueur = _marqueurs_presents(ligne, processus)
         if office or marqueur:
-            decodee = decoder_commande(ligne)
+            decodee = decoder_commande(ligne, processus)
             motif = (f"lancé par {parent}" if office else "avec des options suspectes")
             desc = f"{processus or 'processus inconnu'} {motif} (exécution suspecte) : {ligne}"
             if decodee is not None:
@@ -477,10 +572,16 @@ def qualifier_evenement(e: Evenement, c: Compromission) -> EvenementQualifie:
             if re.search(r"https?://", ligne, re.IGNORECASE):
                 desc += " (téléchargement d'un fichier depuis Internet)"
             return EvenementQualifie(e, "processus_suspect", desc, True, decodee)
+        if e.account and e.account in suivis:
+            return EvenementQualifie(
+                e, "processus_suspect",
+                f"{processus or 'processus inconnu'} : commande exécutée par "
+                f"{_compte_suivi(e.account, c)} (aucun marqueur connu) : {ligne or 'ligne inconnue'}",
+                True, sans_marqueur=True)
         return EvenementQualifie(
             e, "processus_benin",
-            f"processus {processus or 'inconnu'} lancé par {parent or 'inconnu'} (sans anomalie)",
-            False)
+            f"processus {processus or 'inconnu'} lancé par {parent or 'inconnu'} "
+            f"(aucun marqueur suspect)", False)
     if e.event_id == EVT_TACHE:
         return EvenementQualifie(
             e, "tache_planifiee",
@@ -520,7 +621,7 @@ def etape3_chronologie(evts: list[Evenement], piv: ResultatPivot) -> list[Chrono
                 continue
             membre = e.details.get("member") if e.event_id == EVT_AJOUT_GROUPE else None
             if e.host == c.host or e.account in suivis or membre in suivis:
-                retenus.append(qualifier_evenement(e, c))
+                retenus.append(qualifier_evenement(e, c, suivis))
                 if e.event_id == EVT_CREATION_COMPTE:
                     nouveau = e.details.get("new_account")
                     if nouveau and nouveau not in suivis:
@@ -626,6 +727,12 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
                 ajouter("COURT TERME",
                         f"Tâche planifiée {nom} créée sur {e.host} à {quand}",
                         f"Supprimer la tâche planifiée {nom} sur {e.host}")
+            elif q.nature == "processus_suspect" and q.sans_marqueur:
+                ajouter("COURT TERME",
+                        f"Commandes exécutées sur {e.host} par {e.account} après l'intrusion "
+                        f"(première à {quand})",
+                        f"Collecter les preuves sur {e.host} (mémoire, disque) et analyser "
+                        f"les commandes exécutées par {e.account}")
             elif q.nature == "processus_suspect":
                 cmd = q.commande_decodee
                 if not cmd or cmd == "non décodable":
@@ -645,6 +752,11 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
                         f"Connexion de {e.account} sur {e.host} à {quand}, "
                         f"après l'intrusion sur {c.host} (rebond)",
                         f"Isoler {e.host} du réseau et étendre l'investigation")
+            elif q.nature == "connexion_a_verifier":
+                ajouter("COURT TERME",
+                        f"Connexion interactive de {e.account} sur {e.host} à {quand}, "
+                        f"après l'intrusion sur {c.host}",
+                        f"Vérifier auprès de l'utilisateur la connexion sur {e.host} à {quand}")
     for p in piv.non_abouties:
         ajouter("SUIVI",
                 f"{p.ip} a visé {_pl(len(p.comptes), 'compte', 'comptes')} sans jamais se connecter",
@@ -783,13 +895,15 @@ def expliquer_etape5(iocs: list, comptage_vt: dict | None) -> str:
     if not iocs:
         lignes.append("Résultat : aucun IOC extrait (aucune IP suspecte ni compromission).")
     else:
-        par_type = {}
+        par_libelle = {}
         for i in iocs:
-            par_type[i.type_misp] = par_type.get(i.type_misp, 0) + 1
-        detail = ", ".join(f"{n} {t} ({_LIBELLES_IOC.get(t, t)})" for t, n in par_type.items())
+            libelle = _libelle_ioc(i)
+            par_libelle[libelle] = par_libelle.get(libelle, 0) + 1
+        detail = ", ".join(f"{n} {_PLURIELS_LIBELLE.get(t, t) if n > 1 else t}"
+                           for t, n in par_libelle.items())
         lignes.append(f"Résultat : {len(iocs)} IOC : {detail}.")
         for i in iocs:
-            ligne = f"  - {i.valeur}  ({i.type_misp})"
+            ligne = f"  - {i.valeur}  ({_libelle_ioc(i)})"
             if comptage_vt is not None and i.statut_enrichissement:
                 ligne += f"  → {_verdict_vt(i)}"
             lignes.append(ligne)
@@ -837,7 +951,7 @@ def investiguer(chemin: str, enrichir: bool = False, client_vt=None) -> Investig
     chronos = etape3_chronologie(evts, piv)
     actions = etape4_plan(det, piv, chronos, multi_jours)
     gravite = evaluer_gravite(piv, chronos)
-    iocs = extraire_iocs(det, piv, chronos)
+    iocs = extraire_iocs(det, piv, chronos, est_interne=est_interne, multi_jours=multi_jours)
     comptage_vt = None
     if enrichir:
         if client_vt is None:
@@ -890,6 +1004,16 @@ _LIBELLES_ROLE = {
     "tache": "tâche planifiée", "commande": "commande suspecte", "hash": "empreinte",
 }
 _LIBELLES_RESEAU = {"url": "URL", "domain": "domaine", "ip-dst": "IP contactée"}
+
+
+_PLURIELS_LIBELLE = {
+    "compte compromis": "comptes compromis", "machine touchée": "machines touchées",
+    "compte créé": "comptes créés", "tâche planifiée": "tâches planifiées",
+    "commande suspecte": "commandes suspectes", "empreinte": "empreintes",
+    "domaine": "domaines", "IP contactée": "IP contactées",
+    "empreinte de fichier": "empreintes de fichier", "adresse web": "adresses web",
+    "IP de destination": "IP de destination",
+}
 
 
 def _libelle_ioc(ioc) -> str:
