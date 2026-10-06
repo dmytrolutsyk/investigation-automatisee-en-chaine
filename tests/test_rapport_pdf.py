@@ -1,3 +1,4 @@
+import base64
 import builtins
 import contextlib
 import importlib.util
@@ -55,6 +56,8 @@ class TestDonneesRapport(_Base):
         attendues = [a.action for a in inv.actions if a.priorite == "IMMÉDIAT"]
         self.assertEqual(d["actions_prioritaires"], attendues)
         self.assertTrue(any("Isoler SRV-FILE02" in a for a in d["actions_prioritaires"]))
+        self.assertIn("un même mot de passe essayé sur de nombreux comptes", d["synthese"][0])
+        self.assertEqual(d["synthese"][0].count("un même mot de passe"), 1)
 
     def test_etapes_reprennent_les_explications(self):
         d = construire_donnees_rapport(investiguer(self.jeu()), GENERE_LE)
@@ -128,16 +131,31 @@ class TestPDF(_Base):
         self.assertNotIn("&lt;", texte)
         self.assertNotIn("&amp;", texte)
 
+    @unittest.skipUnless(shutil.which("pdftotext"), "pdftotext absent")
     def test_texte_a_echapper(self):
         evts = construire_jeu()
         for e in evts:
             if e["event_id"] == 4698:
                 e["details"]["task_name"] = "\\A<b>&C"
+        texte = subprocess.run(["pdftotext", self.generer(evts), "-"],
+                               capture_output=True, text=True).stdout
+        self.assertIn("\\A<b>&C", texte)
+
+    def test_commande_tres_longue(self):
+        """Une ligne de commande de ~10 000 caractères ne casse pas la mise en page."""
+        evts = construire_jeu()
+        charge = base64.b64encode(("Write-Host 'x' <&>\\ " * 230).encode("utf-16-le")).decode()
+        for e in evts:
+            if e["event_id"] == 4688 and e["account"] == "adm_tmp":
+                e["details"]["command_line"] = "powershell.exe -enc " + charge
+        self.assertGreater(len(charge), 9000)
         chemin = self.generer(evts)
+        with open(chemin, "rb") as f:
+            self.assertEqual(f.read(5), b"%PDF-")
         if shutil.which("pdftotext"):
             texte = subprocess.run(["pdftotext", chemin, "-"],
                                    capture_output=True, text=True).stdout
-            self.assertIn("\\A<b>&C", texte)
+            self.assertIn("tronqué", texte)
 
     def test_jeu_vide(self):
         with open(self.generer([]), "rb") as f:
@@ -176,6 +194,19 @@ class TestMainPDF(_Base):
         self.assertEqual(code, 0)
         self.assertIn("PDF non généré : reportlab absent", out)
         self.assertFalse(os.path.exists(os.path.join(self.dossier, "rapport_incident.pdf")))
+
+    @unittest.skipUnless(REPORTLAB, "reportlab absent")
+    def test_main_erreur_mise_en_page(self):
+        from reportlab.platypus.doctemplate import LayoutError
+        with mock.patch("rapport_pdf.generer_pdf", side_effect=LayoutError("trop grand")):
+            code, out, err = self.lancer([self.jeu()])
+        self.assertEqual(code, 1)
+        self.assertIn("PDF non généré", err)
+        self.assertIn("trop grand", err)
+        self.assertNotIn("Traceback", err)
+        for f in ("sortie_rapport.txt", "iocs_misp.csv", "iocs_stix.json"):
+            self.assertTrue(os.path.exists(os.path.join(self.dossier, f)))
+        self.assertNotIn("rapport_incident.pdf", out.split("Fichiers produits")[-1])
 
     @unittest.skipUnless(REPORTLAB, "reportlab absent")
     def test_main_erreur_ecriture_pdf(self):

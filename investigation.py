@@ -906,15 +906,29 @@ def _enumerer(elements: list[str]) -> str:
     return ", ".join(elements[:-1]) + " et " + elements[-1]
 
 
+_GLOSES_PROFIL = {
+    "spraying": "un même mot de passe essayé sur de nombreux comptes",
+    "force_brute": "de nombreux mots de passe essayés sur un même compte",
+}
+
+
 def _synthese(inv: Investigation) -> list[str]:
     """Trois phrases non techniques : détection, intrusion, actions et gravité."""
     det, piv, h = inv.det, inv.piv, (lambda dt: formater_heure(dt, inv.multi_jours))
     nb_evts = _pl(len(inv.evts), "événement", "événements")
 
     if det.suspectes:
-        sources = _enumerer([
-            f"{p.ip} ({_PROFILS[p.categorie]}, "
-            f"{_pl(len(p.comptes), 'compte visé', 'comptes visés')})" for p in det.suspectes])
+        glosees, morceaux = set(), []
+        for p in det.suspectes:   # profil expliqué à sa première apparition seulement
+            profil = _PROFILS[p.categorie]
+            if p.categorie not in glosees:
+                glosees.add(p.categorie)
+                profil += f", c'est-à-dire {_GLOSES_PROFIL[p.categorie]} ;"
+            else:
+                profil += ","
+            morceaux.append(f"{p.ip} ({profil} "
+                            f"{_pl(len(p.comptes), 'compte visé', 'comptes visés')})")
+        sources = _enumerer(morceaux)
         phrase1 = (f"L'analyse de {nb_evts} a mis en évidence "
                    f"{_pl(len(det.suspectes), 'source', 'sources')} qui "
                    f"{'a' if len(det.suspectes) == 1 else 'ont'} tenté de deviner des mots "
@@ -1042,18 +1056,26 @@ def main(argv: list[str] | None = None) -> int:
         exporter_misp_csv(inv.iocs, SORTIE_MISP)
         exporter_stix(inv.iocs, SORTIE_STIX, genere_le, _valide_depuis(inv, genere_le))
         produits = [SORTIE_TXT, SORTIE_MISP, SORTIE_STIX]
+        erreur_pdf = False
         try:
             from rapport_pdf import generer_pdf
         except ImportError:
             print("\nPDF non généré : reportlab absent (pip/apt install reportlab)")
         else:
-            generer_pdf(SORTIE_PDF, construire_donnees_rapport(inv, genere_le))
-            produits.append(SORTIE_PDF)
+            try:
+                generer_pdf(SORTIE_PDF, construire_donnees_rapport(inv, genere_le))
+                produits.append(SORTIE_PDF)
+            except OSError:
+                raise
+            except Exception as exc:  # mise en page impossible (LayoutError de reportlab…)
+                print(f"Erreur : PDF non généré : {type(exc).__name__} : {str(exc)[:300]}",
+                      file=sys.stderr)
+                erreur_pdf = True
     except OSError as exc:
         print(f"Erreur : écriture des fichiers de sortie impossible ({exc})", file=sys.stderr)
         return 1
     print(f"\nFichiers produits : {', '.join(produits)}")
-    return 0
+    return 1 if erreur_pdf else 0
 
 
 if __name__ == "__main__":

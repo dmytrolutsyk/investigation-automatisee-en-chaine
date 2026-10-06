@@ -33,15 +33,25 @@ POLICE, POLICE_GRAS, POLICE_ITALIQUE = "Helvetica", "Helvetica-Bold", "Helvetica
 
 MARGE = 18 * mm
 LARGEUR_UTILE = A4[0] - 2 * MARGE
+# Au-delà, un texte (ligne de commande encodée…) est tronqué à l'affichage : une
+# cellule ou une ligne de carte ne peut pas dépasser la hauteur d'une page.
+LIMITE_AFFICHAGE = 800
+LIMITE_JETON = 120   # un jeton sans espace (base64…) est raccourci, la suite reste lisible
+JETON_LONG = re.compile(r"\S{%d,}" % (LIMITE_JETON + 1))
+SUFFIXE_TRONQUE = (" … [tronqué pour l'affichage : valeur complète dans le rapport texte "
+                   "et l'export MISP]")
 PRUDENCE = ("Rappel de prudence : ces indicateurs proviennent d'une analyse automatisée. "
             "Faites-les valider par l'équipe sécurité avant de les bloquer ou de les "
             "partager, et ne soumettez jamais de fichier interne à un service en ligne.")
 
 
 # --- Texte ------------------------------------------------------------------
-def _txt(valeur) -> str:
-    """Texte sûr pour Paragraph : caractères hors police remplacés, puis échappé."""
-    texte = str(valeur).replace("→", "->").replace("​", "")
+def _txt(valeur, limite: int = LIMITE_AFFICHAGE) -> str:
+    """Texte sûr pour Paragraph : tronqué, caractères hors police remplacés, échappé."""
+    texte = str(valeur).replace("→", "->").replace("\u200b", "")
+    texte = JETON_LONG.sub(lambda m: m.group(0)[:LIMITE_JETON] + "…[tronqué]", texte)
+    if len(texte) > limite:
+        texte = texte[:limite] + SUFFIXE_TRONQUE
     texte = texte.encode("cp1252", "replace").decode("cp1252")  # polices standard : WinAnsi
     return escape(texte)
 
@@ -169,6 +179,9 @@ def _badge_gravite(gravite):
 _LIBELLES = (("Recherche :", "Ce que l'on cherche :"), ("Résultat :", "Ce que l'on trouve :"),
              ("->", "Conclusion :"), ("Note :", "Note :"))
 _EN_TETE_PRIORITE = re.compile(r"^[A-ZÉÈ ]+ :$")
+# Étape 5 condensée : le décompte par type MISP est remplacé par le seul total
+# (l'annexe donne les types en clair).
+_DECOMPTE_IOC = re.compile(r"^(Résultat : \d+ IOC) : .*$")
 
 
 def _ligne_etape(ligne: str, condense: bool):
@@ -178,6 +191,8 @@ def _ligne_etape(ligne: str, condense: bool):
     if not brut:
         return None
     if retrait == 0:
+        if condense:
+            brut = _DECOMPTE_IOC.sub(r"\1.", brut)
         for prefixe, libelle in _LIBELLES:
             if brut.startswith(prefixe):
                 reste = brut[len(prefixe):].strip()
@@ -312,7 +327,7 @@ def generer_pdf(chemin: str, donnees: dict) -> None:
                           {0: lambda v: Paragraph(_txt(v), S_CELLULE_GRAS)},
                           alertes=suspects))
         h.append(Spacer(1, 1.5 * mm))
-        h.append(Paragraph("Les lignes sur fond rouge sont les actions suspectes.", S_NOTE))
+        h.append(Paragraph("Les actions suspectes sont surlignées en rouge.", S_NOTE))
     else:
         h.append(_carte([Paragraph("Aucune activité d'attaquant à retracer.", S_CORPS)]))
 
