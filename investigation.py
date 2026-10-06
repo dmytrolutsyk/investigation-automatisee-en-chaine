@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 import ipaddress
 import json
 import ntpath
+import re
 
 # --- Paramètres -------------------------------------------------------------
 FICHIER_LOGS = "logs_test.json"
@@ -421,6 +422,23 @@ def _nom_processus(chemin) -> str:
     return ntpath.basename(str(chemin or "").replace("/", "\\")).lower()
 
 
+_SEPARATEURS = re.compile(r"[\s(),;'\"{}|=.]+")
+_EXTENSIONS_EXE = (".exe", ".com", ".bat", ".cmd")
+
+
+def _marqueurs_presents(ligne: str) -> bool:
+    """Vrai si un marqueur suspect figure comme mot entier parmi les arguments.
+
+    L'exécutable (premier mot) est ignoré : iexplore.exe ou un chemin contenant
+    « hidden » ne comptent pas, pas plus que -nopause pour -nop.
+    """
+    mots = ligne.split(None, 1)
+    if mots and mots[0].lower().strip('"').endswith(_EXTENSIONS_EXE):
+        ligne = mots[1] if len(mots) > 1 else ""
+    jetons = {j for j in _SEPARATEURS.split(ligne.lower()) if j}
+    return any(m in jetons for m in MARQUEURS_CMD_SUSPECTS)
+
+
 def qualifier_evenement(e: Evenement, c: Compromission) -> EvenementQualifie:
     """Qualifie un événement du périmètre de la compromission c."""
     d = e.details
@@ -442,15 +460,16 @@ def qualifier_evenement(e: Evenement, c: Compromission) -> EvenementQualifie:
         processus = _nom_processus(d.get("process"))
         parent = _nom_processus(d.get("parent_process"))
         ligne = str(d.get("command_line") or "")
-        ligne_min = ligne.lower()
         office = parent in PARENTS_BUREAUTIQUES and processus in INTERPRETEURS
-        marqueur = any(m in ligne_min for m in MARQUEURS_CMD_SUSPECTS)
+        marqueur = _marqueurs_presents(ligne)
         if office or marqueur:
             decodee = decoder_commande(ligne)
             motif = (f"lancé par {parent}" if office else "avec des options suspectes")
             desc = f"{processus or 'processus inconnu'} {motif} (exécution suspecte) : {ligne}"
             if decodee is not None:
-                desc += f" ; commande décodée : {decodee}"
+                desc += f" ; commande décodée : {decodee} (commande encodée, contenu masqué)"
+            if re.search(r"https?://", ligne, re.IGNORECASE):
+                desc += " (téléchargement d'un fichier depuis Internet)"
             return EvenementQualifie(e, "processus_suspect", desc, True, decodee)
         return EvenementQualifie(
             e, "processus_benin",

