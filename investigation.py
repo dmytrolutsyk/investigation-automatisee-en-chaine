@@ -849,13 +849,29 @@ def investiguer(chemin: str, enrichir: bool = False, client_vt=None) -> Investig
                          comptage_vt, multi_jours)
 
 
+def _periode(inv: Investigation, separateur: str = " → ") -> str:
+    """Période couverte par les événements, en UTC, ou « aucune donnée »."""
+    if not inv.evts:
+        return "aucune donnée"
+    return (f"{inv.evts[0].timestamp:%d/%m/%Y %H:%M}{separateur}"
+            f"{inv.evts[-1].timestamp:%d/%m/%Y %H:%M} UTC")
+
+
+def _explications(inv: Investigation) -> list[str]:
+    """Textes des étapes 1 à 5, communs au rapport texte et au PDF."""
+    return [
+        expliquer_etape1(inv.det, inv.multi_jours),
+        expliquer_etape2(inv.piv, inv.multi_jours),
+        expliquer_etape3(inv.chronos, inv.multi_jours),
+        expliquer_etape4(inv.actions, inv.gravite, inv.piv, inv.chronos,
+                         nb_ip_suspectes=len(inv.det.suspectes)),
+        expliquer_etape5(inv.iocs, inv.comptage_vt),
+    ]
+
+
 def rapport_texte(inv: Investigation) -> str:
     """Rapport complet : en-tête puis les explications des étapes 1 à 5."""
-    if inv.evts:
-        periode = (f"{inv.evts[0].timestamp:%d/%m/%Y %H:%M} → "
-                   f"{inv.evts[-1].timestamp:%d/%m/%Y %H:%M} UTC")
-    else:
-        periode = "aucune donnée"
+    periode = _periode(inv)
     en_tete = "\n".join([
         "RAPPORT D'INVESTIGATION AUTOMATISÉE",
         f"Fichier analysé : {inv.chemin}",
@@ -864,16 +880,129 @@ def rapport_texte(inv: Investigation) -> str:
         "Toutes les heures du rapport sont exprimées en UTC.",
         f"Gravité : {inv.gravite}",
     ])
-    blocs = [
-        en_tete,
-        expliquer_etape1(inv.det, inv.multi_jours),
-        expliquer_etape2(inv.piv, inv.multi_jours),
-        expliquer_etape3(inv.chronos, inv.multi_jours),
-        expliquer_etape4(inv.actions, inv.gravite, inv.piv, inv.chronos,
-                         nb_ip_suspectes=len(inv.det.suspectes)),
-        expliquer_etape5(inv.iocs, inv.comptage_vt),
-    ]
-    return "\n\n".join(blocs) + "\n"
+    return "\n\n".join([en_tete, *_explications(inv)]) + "\n"
+
+
+# --- Données du rapport PDF -------------------------------------------------
+_LIBELLES_ROLE = {
+    "ip_attaque": "IP d'attaque", "compte_compromis": "compte compromis",
+    "machine": "machine touchée", "compte_cree": "compte créé",
+    "tache": "tâche planifiée", "commande": "commande suspecte", "hash": "empreinte",
+}
+_LIBELLES_RESEAU = {"url": "URL", "domain": "domaine", "ip-dst": "IP contactée"}
+
+
+def _libelle_ioc(ioc) -> str:
+    """Libellé français du type d'un IOC, d'après son rôle puis son type MISP."""
+    if ioc.role == "reseau":
+        return _LIBELLES_RESEAU.get(ioc.type_misp, ioc.type_misp)
+    return _LIBELLES_ROLE.get(ioc.role) or _LIBELLES_IOC.get(ioc.type_misp, ioc.type_misp)
+
+
+def _enumerer(elements: list[str]) -> str:
+    """'a', 'a et b', 'a, b et c'."""
+    if len(elements) <= 1:
+        return "".join(elements)
+    return ", ".join(elements[:-1]) + " et " + elements[-1]
+
+
+def _synthese(inv: Investigation) -> list[str]:
+    """Trois phrases non techniques : détection, intrusion, actions et gravité."""
+    det, piv, h = inv.det, inv.piv, (lambda dt: formater_heure(dt, inv.multi_jours))
+    nb_evts = _pl(len(inv.evts), "événement", "événements")
+
+    if det.suspectes:
+        sources = _enumerer([
+            f"{p.ip} ({_PROFILS[p.categorie]}, "
+            f"{_pl(len(p.comptes), 'compte visé', 'comptes visés')})" for p in det.suspectes])
+        phrase1 = (f"L'analyse de {nb_evts} a mis en évidence "
+                   f"{_pl(len(det.suspectes), 'source', 'sources')} qui "
+                   f"{'a' if len(det.suspectes) == 1 else 'ont'} tenté de deviner des mots "
+                   f"de passe : {sources}.")
+    elif inv.evts:
+        phrase1 = (f"L'analyse de {nb_evts} n'a révélé aucune tentative massive de "
+                   f"deviner des mots de passe.")
+    else:
+        phrase1 = ("Le fichier analysé ne contient aucun événement exploitable : "
+                   "aucune tentative d'attaque n'a pu y être recherchée.")
+
+    if piv.compromissions:
+        entrees = _enumerer([
+            f"sur {c.host} avec le compte {c.compte} à {h(c.t0)} (depuis {c.ip})"
+            for c in piv.compromissions])
+        phrase2 = f"L'attaquant a réussi à entrer : il s'est connecté {entrees}."
+    elif det.suspectes:
+        phrase2 = ("Aucune connexion n'a réussi depuis ces sources : "
+                   "l'attaquant n'est pas entré dans le système.")
+    else:
+        phrase2 = "Aucune connexion d'un attaquant n'a donc été constatée."
+
+    faits = []
+    for ch in inv.chronos:
+        for q in ch.evenements:
+            d = q.evt.details
+            if q.nature == "processus_suspect":
+                faits.append(f"exécuté une commande suspecte sur {q.evt.host}")
+            elif q.nature == "tache_planifiee":
+                faits.append(f"programmé la tâche {d.get('task_name') or 'inconnue'} "
+                             f"pour revenir plus tard")
+            elif q.nature == "creation_compte":
+                faits.append(f"créé le compte {d.get('new_account') or 'inconnu'}")
+            elif q.nature == "ajout_groupe_privilegie":
+                faits.append(f"donné à {d.get('member') or 'un compte'} les droits "
+                             f"d'administration ({d.get('group') or 'groupe à privilèges'})")
+            elif q.nature == "mouvement_lateral":
+                faits.append(f"rebondi vers la machine {q.evt.host}")
+            elif q.nature == "effacement_journal":
+                faits.append(f"effacé le journal de sécurité de {q.evt.host}")
+    faits = list(dict.fromkeys(faits))
+    gravite = inv.gravite.lower()
+    if faits:
+        phrase3 = (f"Une fois entré, l'attaquant a {_enumerer(faits)} ; "
+                   f"la gravité est jugée {gravite}.")
+    else:
+        phrase3 = (f"La gravité est jugée {gravite} : "
+                   f"{_justifier_gravite(inv.gravite, piv, inv.chronos)}.")
+    return [phrase1, phrase2, phrase3]
+
+
+def construire_donnees_rapport(inv: Investigation, genere_le: datetime) -> dict:
+    """Données du rapport PDF, déjà rédigées : rapport_pdf ne fait que la mise en page."""
+    def h(dt):
+        return formater_heure(dt, inv.multi_jours)
+
+    etapes = []
+    for texte in _explications(inv):
+        titre, _, corps = texte.partition("\n")
+        etapes.append({"titre": titre.strip("= ").strip(), "texte": corps})
+
+    vus, chronologie = set(), []
+    for ch in inv.chronos:
+        for q in ch.evenements:
+            if id(q.evt) in vus:   # un même événement peut figurer dans plusieurs chronologies
+                continue
+            vus.add(id(q.evt))
+            chronologie.append((q.evt.timestamp, [
+                h(q.evt.timestamp), q.evt.host, q.evt.account,
+                ("[!] " if q.suspect else "") + q.description]))
+    chronologie.sort(key=lambda x: x[0])
+
+    return {
+        "titre": "Rapport d'incident de sécurité",
+        "fichier": os.path.basename(inv.chemin),
+        "nb_evenements": len(inv.evts),
+        "periode": _periode(inv, " au "),
+        "gravite": inv.gravite,
+        "synthese": _synthese(inv),
+        "actions_prioritaires": [a.action for a in inv.actions if a.priorite == PRIORITES[0]],
+        "etapes": etapes,
+        "chronologie": [ligne for _, ligne in chronologie],
+        "plan": [[a.fait, a.action, a.priorite] for a in inv.actions],
+        "iocs": [[i.valeur, _libelle_ioc(i),
+                  _verdict_vt(i) if i.statut_enrichissement else "non vérifié"]
+                 for i in inv.iocs],
+        "genere_le": f"{genere_le.astimezone(timezone.utc):%d/%m/%Y à %H:%M} UTC",
+    }
 
 
 def _valide_depuis(inv: Investigation, genere_le: datetime) -> datetime:
@@ -912,10 +1041,18 @@ def main(argv: list[str] | None = None) -> int:
             f.write(texte)
         exporter_misp_csv(inv.iocs, SORTIE_MISP)
         exporter_stix(inv.iocs, SORTIE_STIX, genere_le, _valide_depuis(inv, genere_le))
+        produits = [SORTIE_TXT, SORTIE_MISP, SORTIE_STIX]
+        try:
+            from rapport_pdf import generer_pdf
+        except ImportError:
+            print("\nPDF non généré : reportlab absent (pip/apt install reportlab)")
+        else:
+            generer_pdf(SORTIE_PDF, construire_donnees_rapport(inv, genere_le))
+            produits.append(SORTIE_PDF)
     except OSError as exc:
         print(f"Erreur : écriture des fichiers de sortie impossible ({exc})", file=sys.stderr)
         return 1
-    print(f"\nFichiers produits : {SORTIE_TXT}, {SORTIE_MISP}, {SORTIE_STIX}")
+    print(f"\nFichiers produits : {', '.join(produits)}")
     return 0
 
 
