@@ -8,7 +8,8 @@ from investigation import (ErreurChargement, Evenement, charger_logs, est_intern
                            decoder_commande, etape1_detection, etape2_pivot,
                            etape3_chronologie, expliquer_etape1, expliquer_etape2,
                            expliquer_etape3, expliquer_etape4, etape4_plan,
-                           evaluer_gravite, formater_heure, PRIORITES, ResultatPivot)
+                           evaluer_gravite, formater_heure, PRIORITES, ProfilIP,
+                           ResultatDetection, ResultatPivot)
 from tests.jeu_synthetique import (B64_GET_PROCESS, IP_BRUTE, IP_FP, IP_SPRAY_A, IP_SPRAY_B,
                                    chemin_jeu_synthetique, construire_jeu, ecrire_jeu)
 
@@ -358,10 +359,6 @@ class TestEtape3(unittest.TestCase):
         self.assertIn("aucune compromission", expliquer_etape3([], False))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestEtape4(unittest.TestCase):
     def _etapes(self, supplementaires=()):
         chemin = ecrire_jeu(construire_jeu() + list(supplementaires))
@@ -407,7 +404,8 @@ class TestEtape4(unittest.TestCase):
         self.assertTrue(all(a.fait and a.priorite in PRIORITES for a in self.actions))
 
     def test_dedoublonnage_et_tri(self):
-        self.assertEqual(len(self.actions), len(set(self.actions)))
+        textes = [a.action for a in self.actions]
+        self.assertEqual(len(textes), len(set(textes)))
         rangs = [PRIORITES.index(a.priorite) for a in self.actions]
         self.assertEqual(rangs, sorted(rangs))
 
@@ -418,7 +416,70 @@ class TestEtape4(unittest.TestCase):
         self.assertEqual(evaluer_gravite(self.piv, []), "ÉLEVÉE")
 
     def test_explication(self):
-        t = expliquer_etape4(self.actions, "CRITIQUE")
+        t = expliquer_etape4(self.actions, "CRITIQUE", self.piv, self.chronos,
+                             len(self.det.suspectes))
         self.assertIn("=== ÉTAPE 4", t)
+        self.assertIn("3 IP suspectes", t)
+        self.assertIn("1 compromission", t)
+        self.assertIn("rebond vers WKS-205", t)
+        self.assertIn("Admins du domaine", t)
+        self.assertNotIn("journal de sécurité effacé", t)
         self.assertIn("->", t)
         self.assertIn("CRITIQUE", t)
+
+    def _prio(self, debut, actions=None):
+        trouvees = [a for a in (actions or self.actions) if a.action.startswith(debut)]
+        self.assertEqual(len(trouvees), 1, debut)
+        return trouvees[0].priorite
+
+    def test_priorites_attendues(self):
+        self.assertEqual(self._prio("Retirer adm_tmp du groupe Admins du domaine"), "IMMÉDIAT")
+        self.assertEqual(self._prio("Isoler WKS-205"), "IMMÉDIAT")
+        self.assertEqual(self._prio("Isoler SRV-FILE02"), "IMMÉDIAT")
+        self.assertEqual(self._prio("Supprimer la tâche planifiée"), "COURT TERME")
+        self.assertEqual(self._prio("Vérifier le mot de passe du compte de service svc_web"),
+                         "SUIVI")
+
+    def test_groupe_non_privilegie_court_terme(self):
+        ajout = {"timestamp": "2026-05-20T09:20:00Z", "event_id": 4732, "host": "SRV-FILE02",
+                 "account": "u.trois", "src_ip": None, "logon_type": None,
+                 "result": "success", "details": {"group": "Comptabilité", "member": "u.trois"}}
+        actions = etape4_plan(*self._etapes([ajout]))
+        self.assertEqual(self._prio("Retirer u.trois du groupe Comptabilité", actions),
+                         "COURT TERME")
+
+    def test_commande_non_decodable_utilise_la_ligne_brute(self):
+        brut = "powershell.exe -enc !!!pas_du_base64"
+        proc = {"timestamp": "2026-05-20T09:21:00Z", "event_id": 4688, "host": "SRV-FILE02",
+                "account": "u.trois", "src_ip": None, "logon_type": None, "result": "success",
+                "details": {"process": "powershell.exe", "parent_process": "explorer.exe",
+                            "command_line": brut}}
+        actions = etape4_plan(*self._etapes([proc]))
+        self.assertTrue(any(a.action.endswith("analyser la commande : " + brut)
+                            for a in actions))
+        self.assertFalse(any("non décodable" in a.action for a in actions))
+
+    def test_pas_de_faux_positif_pour_sous_seuil(self):
+        det = self.det
+        sous = ProfilIP("10.9.9.9", 12, ["a", "b"], ["H"], det.suspectes[0].debut,
+                        det.suspectes[0].fin, "sous_seuil", "x")
+        det2 = ResultatDetection(det.suspectes, det.ecartees + [sous], 0, 0, 0)
+        actions = etape4_plan(det2, self.piv, self.chronos)
+        self.assertEqual(sum("compte de service" in a.action for a in actions), 1)
+        self.assertFalse(any("10.9.9.9" in a.fait for a in actions))
+
+    def test_comptes_une_action_par_ip(self):
+        surveiller = [a for a in self.actions if a.action.startswith("Surveiller")]
+        revoir = [a for a in self.actions if a.action.startswith("Revoir")]
+        self.assertEqual(len(surveiller), len(self.piv.non_abouties))
+        self.assertEqual(len(revoir), sum(p.categorie == "spraying" for p in self.det.suspectes))
+        self.assertTrue(all(a.priorite == "SUIVI" for a in surveiller + revoir))
+
+    def test_jargon_glose(self):
+        textes = " ".join(a.action for a in self.actions)
+        self.assertIn("MFA (double authentification)", textes)
+        self.assertIn("(le déconnecter partout)", textes)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -580,7 +580,9 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
     Dédoublonné (une action identique n'apparaît qu'une fois, avec le premier
     fait qui l'a motivée), trié par priorité puis par ordre d'apparition.
     """
-    h = lambda dt: formater_heure(dt, multi_jours)  # noqa: E731
+    def h(dt):
+        return formater_heure(dt, multi_jours)
+
     actions = []
 
     def ajouter(priorite, fait, action):
@@ -596,7 +598,8 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
                   f"avec {c.compte}")
         ajouter("IMMÉDIAT", fait_c, f"Isoler {c.host} du réseau")
         ajouter("IMMÉDIAT", fait_c,
-                f"Réinitialiser le mot de passe de {c.compte} et révoquer ses sessions")
+                f"Réinitialiser le mot de passe de {c.compte} et révoquer ses sessions "
+                f"(le déconnecter partout)")
         for q in ch.evenements:
             e, d, quand = q.evt, q.evt.details, h(q.evt.timestamp)
             if q.nature == "creation_compte":
@@ -629,7 +632,8 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
                 ajouter("COURT TERME",
                         f"Journal de sécurité effacé sur {e.host} à {quand} par {e.account}",
                         f"Traçabilité locale perdue sur {e.host} : "
-                        f"s'appuyer sur le SIEM central et les sauvegardes")
+                        f"s'appuyer sur le SIEM (outil central de collecte des journaux) "
+                        f"et les sauvegardes")
             elif q.nature == "mouvement_lateral":
                 ajouter("IMMÉDIAT",
                         f"Connexion de {e.account} sur {e.host} à {quand}, "
@@ -638,9 +642,10 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
     for p in piv.non_abouties:
         ajouter("SUIVI",
                 f"{p.ip} a visé {_pl(len(p.comptes), 'compte', 'comptes')} sans jamais se connecter",
-                f"Surveiller les comptes visés ({len(p.comptes)}) et imposer le MFA")
+                f"Surveiller les comptes visés ({len(p.comptes)}) et imposer le MFA "
+                f"(double authentification)")
     for p in det.ecartees:
-        if p.categorie == "faux_positif_probable":
+        if p.categorie == "faux_positif_probable" and p.comptes:
             ajouter("SUIVI",
                     f"{p.nb_echecs} échecs de {p.comptes[0]} depuis {p.ip} (réseau interne) "
                     f"sur {', '.join(p.hosts)}",
@@ -652,12 +657,13 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
                     f"{p.ip} a testé {_pl(len(p.comptes), 'compte', 'comptes')} (password spraying)",
                     f"Revoir la robustesse des mots de passe des {len(p.comptes)} comptes visés")
 
-    vus, uniques = set(), []
+    # une action identique n'apparaît qu'une fois, avec sa priorité la plus haute
+    retenues = {}
     for a in actions:
-        if (a.priorite, a.action) not in vus:
-            vus.add((a.priorite, a.action))
-            uniques.append(a)
-    # tri stable : l'ordre d'apparition est conservé à priorité égale
+        if a.action not in retenues or (PRIORITES.index(a.priorite)
+                                        < PRIORITES.index(retenues[a.action].priorite)):
+            retenues[a.action] = a
+    uniques = list(retenues.values())
     return sorted(uniques, key=lambda a: PRIORITES.index(a.priorite))
 
 
@@ -673,25 +679,46 @@ def evaluer_gravite(piv: ResultatPivot, chronos: list[Chronologie]) -> str:
     return "FAIBLE"
 
 
-_JUSTIF_GRAVITE = {
-    "CRITIQUE": "l'attaquant est entré, a étendu son emprise (droits élevés, rebond sur "
-                "une autre machine ou traces effacées) : il faut agir tout de suite",
-    "ÉLEVÉE": "l'attaquant a réussi à se connecter, sans extension d'emprise constatée à ce stade",
-    "MODÉRÉE": "des attaques ont été détectées mais aucune connexion réussie : "
-               "le risque reste à surveiller",
-    "FAIBLE": "aucune attaque significative détectée dans les journaux analysés",
-}
+def _justifier_gravite(gravite: str, piv: ResultatPivot, actions: list[Action],
+                       chronos: list[Chronologie]) -> str:
+    """Justification de la gravité, limitée à ce qui a été observé."""
+    constats = []
+    for ch in chronos:
+        for q in ch.evenements:
+            if q.nature == "ajout_groupe_privilegie":
+                constats.append(f"ajout de {q.evt.details.get('member') or 'un compte'} au groupe "
+                                f"{q.evt.details.get('group') or 'à privilèges'}")
+            elif q.nature == "mouvement_lateral":
+                constats.append(f"rebond vers {q.evt.host}")
+            elif q.nature == "effacement_journal":
+                constats.append(f"effacement du journal de sécurité de {q.evt.host}")
+    if gravite == "CRITIQUE":
+        return ("l'attaquant a étendu son emprise (" + ", ".join(constats) + ")"
+                if constats else "l'attaquant a étendu son emprise")
+    if gravite == "ÉLEVÉE":
+        return ("l'attaquant s'est connecté avec succès à "
+                + ", ".join(sorted({c.host for c in piv.compromissions}))
+                + ", sans extension d'emprise constatée")
+    if gravite == "MODÉRÉE":
+        return "des attaques ont été détectées mais aucune connexion réussie"
+    return "aucune attaque significative détectée"
 
 
-def expliquer_etape4(actions: list[Action], gravite: str) -> str:
+def expliquer_etape4(actions: list[Action], gravite: str, piv: ResultatPivot | None = None,
+                     chronos: list[Chronologie] | None = None,
+                     nb_ip_suspectes: int = 0) -> str:
     """Explication en français, destinée à un lecteur non technique."""
     lignes = ["=== ÉTAPE 4 : PLAN D'ACTION ET GRAVITÉ ==="]
+    piv = piv or ResultatPivot([], [])
+    chronos = chronos or []
+    nb_evts = sum(len(ch.evenements) for ch in chronos)
     lignes.append(
-        "Recherche : à partir des faits établis aux étapes 1 à 3 (IP suspectes, comptes "
-        "et machines compromis, actions de l'attaquant), les mesures à prendre ; "
-        "chaque action est rattachée au fait observé qui la justifie.")
+        f"Recherche : à partir de {_pl(nb_ip_suspectes, 'IP suspecte', 'IP suspectes')}, "
+        f"{_pl(len(piv.compromissions), 'compromission', 'compromissions')} et "
+        f"{_pl(nb_evts, 'événement post-intrusion', 'événements post-intrusion')}, "
+        f"les mesures à prendre ; chaque action est rattachée au fait observé qui la justifie.")
     lignes.append(
-        f"Résultat : gravité {gravite} : {_JUSTIF_GRAVITE.get(gravite, '')} ; "
+        f"Résultat : gravité {gravite} : {_justifier_gravite(gravite, piv, actions, chronos)} ; "
         f"{_pl(len(actions), 'action', 'actions')} proposée"
         f"{'' if len(actions) <= 1 else 's'}.")
     for prio in PRIORITES:
