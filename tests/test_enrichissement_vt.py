@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import shutil
@@ -32,7 +33,7 @@ def ok_json(**attrs):
 
 
 def http(code):
-    return urllib.error.HTTPError("http://x", code, "err", {}, None)
+    return urllib.error.HTTPError("http://x", code, "err", {}, io.BytesIO(b""))
 
 
 class Base(unittest.TestCase):
@@ -100,6 +101,35 @@ class TestClientVT(Base):
         r2 = c.consulter("ip-src", "8.8.8.8")
         self.assertEqual((r1.statut, r2.statut), ("cle_invalide", "cle_invalide"))
         self.assertEqual(len(self.appels), 1)
+
+    def test_403_cle_invalide(self):
+        self.reponses = [http(403)]
+        r = self.client().consulter("ip-src", "8.8.4.4")
+        self.assertEqual(r.statut, "cle_invalide")
+        self.assertIn("403", r.message)
+
+    def test_500_indisponible(self):
+        self.reponses = [http(500)]
+        r = self.client().consulter("ip-src", "8.8.4.4")
+        self.assertEqual((r.statut, len(self.appels)), ("indisponible", 1))
+
+    def test_backoff_429(self):
+        self.reponses = [http(429)] * 3
+        self.client().consulter("ip-src", "8.8.4.4")
+        # horloge figée : attente d'intervalle avant les essais 2 et 3,
+        # backoff 15 puis 30 après les 429 (pas d'attente après le dernier)
+        self.assertEqual(self.sommeils, [15, 15, 30, 15])
+
+    def test_cache_sans_cle_api(self):
+        self.reponses = [ok_json()]
+        self.client(cle="SECRET123").consulter("ip-src", "8.8.4.4")
+        with open(self.cache, encoding="utf-8") as f:
+            self.assertNotIn("SECRET123", f.read())
+
+    def test_valeur_echappee(self):
+        self.reponses = [http(404)]
+        self.client().consulter("domain", "a/b?c")
+        self.assertTrue(self.appels[0].full_url.endswith("/domains/a%2Fb%3Fc"))
 
     def test_timeout(self):
         self.reponses = [TimeoutError()]

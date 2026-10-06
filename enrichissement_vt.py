@@ -7,8 +7,10 @@ import base64
 import ipaddress
 import json
 import os
+import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -65,8 +67,9 @@ class ClientVT:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._cache, f, ensure_ascii=False)
             os.replace(tmp, self.chemin_cache)
-        except OSError:
-            pass  # cache non critique
+        except OSError as e:
+            print(f"Avertissement : cache VirusTotal non écrit ({e.strerror}).",
+                  file=sys.stderr)
 
     def _depuis_cache(self, cle_cache):
         e = self._cache.get(cle_cache)
@@ -98,7 +101,7 @@ class ClientVT:
     def _identifiant(type_misp, valeur):
         if type_misp == "url":
             return base64.urlsafe_b64encode(valeur.encode()).decode().rstrip("=")
-        return valeur
+        return urllib.parse.quote(valeur, safe="")
 
     def _attendre_intervalle(self):
         if self._dernier is not None:
@@ -121,6 +124,7 @@ class ClientVT:
             motif = self._non_soumise(valeur)
             if motif:
                 return ResultatVT("non_soumis", None, motif)
+        # Clé invalide : prioritaire sur le cache, l'enrichissement est arrêté net.
         if self._desactive:
             return ResultatVT("cle_invalide", None, "clé refusée par VirusTotal (401)")
         if not self.cle:
@@ -144,6 +148,7 @@ class ClientVT:
                 resultat = ResultatVT("ok", self._extraire(corps))
                 return self._memoriser(cle_cache, resultat)
             except urllib.error.HTTPError as e:
+                e.close()  # libère la réponse d'erreur
                 dernier_code = e.code
                 if e.code == 404:
                     return self._memoriser(
