@@ -108,6 +108,12 @@ class TestIOC(unittest.TestCase):
         # hôte d'URL conservé même avec un TLD hors liste
         self.assertIn(("domain", "c2.exemple.zzz"), extraire_motifs("http://c2.exemple.zzz/x"))
 
+    def test_url_malformee_sans_exception(self):
+        for texte in ("curl http://[::1/x", "http://[abc"):
+            paires = extraire_motifs(texte)  # ne doit pas lever
+            self.assertEqual([t for t, _ in paires if t == "domain"], [])
+            self.assertEqual([t for t, _ in paires if t == "url"], ["url"])
+
     def test_extraction_champ_destination(self):
         from types import SimpleNamespace as N
         evt = N(timestamp=DEPUIS, event_id=4688, host="H1", account="u",
@@ -118,7 +124,7 @@ class TestIOC(unittest.TestCase):
         piv = N(compromissions=[])
         r = extraire_iocs(N(suspectes=[]), piv, [ch])
         self.assertEqual([(i.type_misp, i.valeur) for i in r], [("domain", "evil.example.net")])
-        self.assertIn("champ destination", r[0].commentaire)
+        self.assertIn("dans le champ destination", r[0].commentaire)
 
     def test_motifs(self):
         texte = ("curl http://a.example.org:8080/x?y=1 et 10.1.2.3 "

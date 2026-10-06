@@ -82,7 +82,10 @@ def extraire_motifs(texte: str) -> list[tuple[str, str]]:
     for m in _RE_URL.finditer(texte):
         ajouter("url", m.group(0).rstrip(".,;:)]}"))
     for m in _RE_URL.finditer(texte):  # hôte d'URL : conservé quel que soit le TLD
-        hote = (urlsplit(m.group(0).rstrip(".,;:)]}")).hostname or "")
+        try:
+            hote = urlsplit(m.group(0).rstrip(".,;:)]}")).hostname or ""
+        except ValueError:  # ex. « http://[::1/x » : on garde l'URL (IOC), sans en déduire d'hôte
+            hote = ""
         if hote and not _RE_IPV4.fullmatch(hote) and ":" not in hote:
             ajouter("domain", hote.lower())
     for m in _RE_DOMAINE.finditer(texte):
@@ -169,18 +172,18 @@ def extraire_iocs(det, piv, chronos) -> list[IOC]:
             if q.commande_decodee and q.commande_decodee != ABSENT:
                 sources.append(("commande décodée", q.commande_decodee))
             for cle, texte in sources:
-                origine = "commande décodée" if cle == "commande décodée" else f"champ {cle}"
+                origine = "la commande décodée" if cle == "commande décodée" else f"le champ {cle}"
                 for type_misp, valeur in extraire_motifs(texte):
                     if type_misp == "domain" and cle in CHAMPS_IDENTIFIANTS:
                         continue
                     lieu = f"{origine} de {e.account or 'compte inconnu'} sur {e.host} à {heure}"
                     if type_misp in ("md5", "sha1", "sha256"):
                         ajouter(valeur, type_misp, "Payload delivery", True,
-                                f"Empreinte {type_misp.upper()} observée dans le {lieu}", "hash")
+                                f"Empreinte {type_misp.upper()} observée dans {lieu}", "hash")
                     else:
                         nom = {"url": "URL", "domain": "Domaine", "ip-dst": "IP de destination"}[type_misp]
                         ajouter(valeur, type_misp, "Network activity", True,
-                                f"{nom} observé(e) dans le {lieu}", "reseau")
+                                f"{nom} observé(e) dans {lieu}", "reseau")
     return iocs
 
 
