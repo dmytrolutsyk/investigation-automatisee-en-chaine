@@ -642,7 +642,7 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
     for p in piv.non_abouties:
         ajouter("SUIVI",
                 f"{p.ip} a visé {_pl(len(p.comptes), 'compte', 'comptes')} sans jamais se connecter",
-                f"Surveiller les comptes visés ({len(p.comptes)}) et imposer le MFA "
+                f"Surveiller les comptes visés par {p.ip} ({len(p.comptes)}) et imposer le MFA "
                 f"(double authentification)")
     for p in det.ecartees:
         if p.categorie == "faux_positif_probable" and p.comptes:
@@ -655,7 +655,7 @@ def etape4_plan(det: ResultatDetection, piv: ResultatPivot,
         if p.categorie == "spraying":
             ajouter("SUIVI",
                     f"{p.ip} a testé {_pl(len(p.comptes), 'compte', 'comptes')} (password spraying)",
-                    f"Revoir la robustesse des mots de passe des {len(p.comptes)} comptes visés")
+                    f"Revoir la robustesse des mots de passe des {len(p.comptes)} comptes visés par {p.ip}")
 
     # une action identique n'apparaît qu'une fois, avec sa priorité la plus haute
     retenues = {}
@@ -679,7 +679,7 @@ def evaluer_gravite(piv: ResultatPivot, chronos: list[Chronologie]) -> str:
     return "FAIBLE"
 
 
-def _justifier_gravite(gravite: str, piv: ResultatPivot, actions: list[Action],
+def _justifier_gravite(gravite: str, piv: ResultatPivot,
                        chronos: list[Chronologie]) -> str:
     """Justification de la gravité, limitée à ce qui a été observé."""
     constats = []
@@ -695,7 +695,7 @@ def _justifier_gravite(gravite: str, piv: ResultatPivot, actions: list[Action],
     if gravite == "CRITIQUE":
         return ("l'attaquant a étendu son emprise (" + ", ".join(constats) + ")"
                 if constats else "l'attaquant a étendu son emprise")
-    if gravite == "ÉLEVÉE":
+    if gravite == "ÉLEVÉE" and piv.compromissions:
         return ("l'attaquant s'est connecté avec succès à "
                 + ", ".join(sorted({c.host for c in piv.compromissions}))
                 + ", sans extension d'emprise constatée")
@@ -718,7 +718,7 @@ def expliquer_etape4(actions: list[Action], gravite: str, piv: ResultatPivot | N
         f"{_pl(nb_evts, 'événement post-intrusion', 'événements post-intrusion')}, "
         f"les mesures à prendre ; chaque action est rattachée au fait observé qui la justifie.")
     lignes.append(
-        f"Résultat : gravité {gravite} : {_justifier_gravite(gravite, piv, actions, chronos)} ; "
+        f"Résultat : gravité {gravite} : {_justifier_gravite(gravite, piv, chronos)} ; "
         f"{_pl(len(actions), 'action', 'actions')} proposée"
         f"{'' if len(actions) <= 1 else 's'}.")
     for prio in PRIORITES:

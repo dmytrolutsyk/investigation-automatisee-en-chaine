@@ -382,7 +382,8 @@ class TestEtape4(unittest.TestCase):
                         "Retirer adm_tmp du groupe Admins du domaine",
                         "Supprimer la tâche planifiée \\OneDriveSyncHelper",
                         "Isoler WKS-205", "svc_web",
-                        "Surveiller les comptes visés (8)", "Revoir la robustesse des mots de passe des 6 comptes",
+                        "Surveiller les comptes visés par " + IP_SPRAY_B + " (8)",
+                        "Revoir la robustesse des mots de passe des 6 comptes visés par " + IP_SPRAY_A,
                         "Get-Process"):
             self.assertIn(attendu, textes)
 
@@ -474,6 +475,23 @@ class TestEtape4(unittest.TestCase):
         self.assertEqual(len(surveiller), len(self.piv.non_abouties))
         self.assertEqual(len(revoir), sum(p.categorie == "spraying" for p in self.det.suspectes))
         self.assertTrue(all(a.priorite == "SUIVI" for a in surveiller + revoir))
+
+    def test_deux_ip_meme_nombre_de_comptes(self):
+        evts = []
+        for k, ip in enumerate(("198.51.100.1", "198.51.100.2")):
+            for i in range(14):
+                evts.append({"timestamp": f"2026-05-20T12:{k * 10:02d}:{i:02d}Z",
+                             "event_id": 4625, "host": "H", "account": f"x.{i % 7}",
+                             "src_ip": ip, "logon_type": 3, "result": "success",
+                             "details": {}})
+        chemin = ecrire_jeu(evts)
+        self.addCleanup(os.remove, chemin)
+        e = charger_logs(chemin)
+        det = etape1_detection(e)
+        piv = etape2_pivot(e, det)
+        actions = etape4_plan(det, piv, etape3_chronologie(e, piv))
+        for debut in ("Surveiller", "Revoir"):
+            self.assertEqual(sum(a.action.startswith(debut) for a in actions), 2)
 
     def test_jargon_glose(self):
         textes = " ".join(a.action for a in self.actions)
