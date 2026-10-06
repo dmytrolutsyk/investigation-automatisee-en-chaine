@@ -15,6 +15,7 @@ from investigation import construire_donnees_rapport, investiguer, main
 from iocs import IOC
 from tests.jeu_synthetique import IP_SPRAY_A, IP_SPRAY_B, construire_jeu, ecrire_jeu
 
+DOCX = importlib.util.find_spec("docx") is not None
 REPORTLAB = importlib.util.find_spec("reportlab") is not None
 GENERE_LE = datetime(2026, 5, 20, 14, 30, tzinfo=timezone.utc)
 
@@ -176,7 +177,7 @@ class TestMainPDF(_Base):
 
     @unittest.skipUnless(REPORTLAB, "reportlab absent")
     def test_main_produit_pdf(self):
-        code, out, _ = self.lancer([self.jeu()])
+        code, out, _ = self.lancer([self.jeu(), "--pdf"])
         self.assertEqual(code, 0)
         self.assertTrue(os.path.exists(os.path.join(self.dossier, "rapport_incident.pdf")))
         self.assertIn("rapport_incident.pdf", out.split("Fichiers produits")[1])
@@ -190,7 +191,7 @@ class TestMainPDF(_Base):
             return vrai_import(nom, *args, **kwargs)
 
         with mock.patch("builtins.__import__", faux_import):
-            code, out, _ = self.lancer([self.jeu()])
+            code, out, _ = self.lancer([self.jeu(), "--pdf"])
         self.assertEqual(code, 0)
         self.assertIn("PDF non généré : reportlab absent", out)
         self.assertFalse(os.path.exists(os.path.join(self.dossier, "rapport_incident.pdf")))
@@ -199,7 +200,7 @@ class TestMainPDF(_Base):
     def test_main_erreur_mise_en_page(self):
         from reportlab.platypus.doctemplate import LayoutError
         with mock.patch("rapport_pdf.generer_pdf", side_effect=LayoutError("trop grand")):
-            code, out, err = self.lancer([self.jeu()])
+            code, out, err = self.lancer([self.jeu(), "--pdf"])
         self.assertEqual(code, 1)
         self.assertIn("PDF non généré", err)
         self.assertIn("trop grand", err)
@@ -211,9 +212,65 @@ class TestMainPDF(_Base):
     @unittest.skipUnless(REPORTLAB, "reportlab absent")
     def test_main_erreur_ecriture_pdf(self):
         with mock.patch("rapport_pdf.generer_pdf", side_effect=OSError("disque plein")):
+            code, _, err = self.lancer([self.jeu(), "--pdf"])
+        self.assertEqual(code, 1)
+        self.assertIn("disque plein", err)
+
+
+class TestMainWord(_Base):
+    lancer = TestMainPDF.lancer
+
+    @unittest.skipUnless(DOCX, "python-docx absent")
+    def test_defaut_docx_sans_pdf(self):
+        code, out, _ = self.lancer([self.jeu()])
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.dossier, "rapport_incident.docx")))
+        self.assertFalse(os.path.exists(os.path.join(self.dossier, "rapport_incident.pdf")))
+        self.assertIn("rapport_incident.docx", out.split("Fichiers produits")[1])
+
+    @unittest.skipUnless(DOCX and REPORTLAB, "bibliothèques absentes")
+    def test_option_pdf_produit_les_deux(self):
+        code, out, _ = self.lancer([self.jeu(), "--pdf"])
+        self.assertEqual(code, 0)
+        for f in ("rapport_incident.docx", "rapport_incident.pdf"):
+            self.assertTrue(os.path.exists(os.path.join(self.dossier, f)))
+
+    def test_sans_python_docx(self):
+        vrai_import = builtins.__import__
+
+        def faux_import(nom, *args, **kwargs):
+            if nom == "rapport_word" or nom.startswith("docx"):
+                raise ImportError(nom)
+            return vrai_import(nom, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", faux_import):
+            code, out, _ = self.lancer([self.jeu()])
+        self.assertEqual(code, 0)
+        self.assertIn("Rapport Word non généré : python-docx absent", out)
+        self.assertTrue(os.path.exists(os.path.join(self.dossier, "iocs_misp.csv")))
+        self.assertNotIn("rapport_incident.docx", out.split("Fichiers produits")[-1])
+
+    @unittest.skipUnless(DOCX, "python-docx absent")
+    def test_erreur_generation_word(self):
+        with mock.patch("rapport_word.generer_docx", side_effect=ValueError("boum")):
+            code, _, err = self.lancer([self.jeu()])
+        self.assertEqual(code, 1)
+        self.assertIn("Word non généré", err)
+        self.assertNotIn("Traceback", err)
+
+    @unittest.skipUnless(DOCX, "python-docx absent")
+    def test_erreur_ecriture_word(self):
+        with mock.patch("rapport_word.generer_docx", side_effect=OSError("disque plein")):
             code, _, err = self.lancer([self.jeu()])
         self.assertEqual(code, 1)
         self.assertIn("disque plein", err)
+
+    @unittest.skipUnless(DOCX, "python-docx absent")
+    def test_logo_absent_avertit(self):
+        with mock.patch("investigation.LOGO", "/inexistant/Logo.png"):
+            code, _, err = self.lancer([self.jeu()])
+        self.assertEqual(code, 0)
+        self.assertIn("logo", err.lower())
 
 
 if __name__ == "__main__":

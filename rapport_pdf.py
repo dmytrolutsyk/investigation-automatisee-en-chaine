@@ -6,6 +6,8 @@ le dictionnaire produit par investigation.construire_donnees_rapport.
 import re
 from xml.sax.saxutils import escape
 
+from affichage import (DECOMPTE_IOC as _DECOMPTE_IOC, EN_TETE_PRIORITE as _EN_TETE_PRIORITE,
+                       LIBELLES as _LIBELLES, LIMITE_AFFICHAGE, PRUDENCE, tronquer)
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_JUSTIFY
 from reportlab.lib.pagesizes import A4
@@ -33,25 +35,12 @@ POLICE, POLICE_GRAS, POLICE_ITALIQUE = "Helvetica", "Helvetica-Bold", "Helvetica
 
 MARGE = 18 * mm
 LARGEUR_UTILE = A4[0] - 2 * MARGE
-# Au-delà, un texte (ligne de commande encodée…) est tronqué à l'affichage : une
-# cellule ou une ligne de carte ne peut pas dépasser la hauteur d'une page.
-LIMITE_AFFICHAGE = 800
-LIMITE_JETON = 120   # un jeton sans espace (base64…) est raccourci, la suite reste lisible
-JETON_LONG = re.compile(r"\S{%d,}" % (LIMITE_JETON + 1))
-SUFFIXE_TRONQUE = (" … [tronqué pour l'affichage : valeur complète dans le rapport texte "
-                   "et l'export MISP]")
-PRUDENCE = ("Rappel de prudence : ces indicateurs proviennent d'une analyse automatisée. "
-            "Faites-les valider par l'équipe sécurité avant de les bloquer ou de les "
-            "partager, et ne soumettez jamais de fichier interne à un service en ligne.")
 
 
 # --- Texte ------------------------------------------------------------------
 def _txt(valeur, limite: int = LIMITE_AFFICHAGE) -> str:
     """Texte sûr pour Paragraph : tronqué, caractères hors police remplacés, échappé."""
-    texte = str(valeur).replace("→", "->").replace("\u200b", "")
-    texte = JETON_LONG.sub(lambda m: m.group(0)[:LIMITE_JETON] + "…[tronqué]", texte)
-    if len(texte) > limite:
-        texte = texte[:limite] + SUFFIXE_TRONQUE
+    texte = tronquer(valeur, limite)
     texte = texte.encode("cp1252", "replace").decode("cp1252")  # polices standard : WinAnsi
     return escape(texte)
 
@@ -176,12 +165,6 @@ def _badge_gravite(gravite):
 
 
 # --- Textes des étapes -------------------------------------------------------
-_LIBELLES = (("Recherche :", "Ce que l'on cherche :"), ("Résultat :", "Ce que l'on trouve :"),
-             ("->", "Conclusion :"), ("Note :", "Note :"))
-_EN_TETE_PRIORITE = re.compile(r"^[A-ZÉÈ ]+ :$")
-# Étape 5 condensée : le décompte par type MISP est remplacé par le seul total
-# (l'annexe donne les types en clair).
-_DECOMPTE_IOC = re.compile(r"^(Résultat : \d+ IOC) : .*$")
 
 
 def _ligne_etape(ligne: str, condense: bool):

@@ -12,11 +12,13 @@ de bout en bout, chaque étape s'appuyant sur les conclusions de la précédente
     5. IOC : extraction, enrichissement VirusTotal optionnel, exports MISP/STIX.
 
 Usage :
-    python3 investigation.py [logs.json] [--enrichir]
-    (défaut : FICHIER_LOGS ; --enrichir interroge VirusTotal, clé dans VT_API_KEY)
+    python3 investigation.py [logs.json] [--enrichir] [--pdf]
+    (défaut : FICHIER_LOGS ; --enrichir interroge VirusTotal, clé dans VT_API_KEY ;
+    --pdf produit en plus le rapport PDF)
 
 Sorties (dossier courant) : rapport texte (affiché et sortie_rapport.txt),
-rapport_incident.pdf, iocs_misp.csv (MISP) et iocs_stix.json (STIX 2.1).
+rapport_incident.docx (Word, python-docx ; rapport_incident.pdf en plus avec --pdf,
+reportlab), iocs_misp.csv (MISP) et iocs_stix.json (STIX 2.1).
 Toutes les heures sont en UTC. Python 3.11 ou plus récent.
 
 Paramètres : seuils, réseaux internes, marqueurs de commandes suspectes,
@@ -78,6 +80,8 @@ GROUPES_PRIVILEGIES = {"administrateurs", "administrators", "admins du domaine",
 # Chemins de sortie
 SORTIE_TXT = "sortie_rapport.txt"
 SORTIE_PDF = "rapport_incident.pdf"
+SORTIE_DOCX = "rapport_incident.docx"
+LOGO = "Logo.png"   # relatif au dossier du script ; absent : page de garde sans logo
 SORTIE_MISP = "iocs_misp.csv"
 SORTIE_STIX = "iocs_stix.json"
 
@@ -1178,6 +1182,13 @@ def _valide_depuis(inv: Investigation, genere_le: datetime) -> datetime:
     return genere_le
 
 
+def _chemin_logo() -> str | None:
+    """Chemin du logo (relatif au dossier du script s'il n'est pas absolu), None si absent."""
+    chemin = LOGO if os.path.isabs(LOGO) else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), LOGO)
+    return chemin if os.path.isfile(chemin) else None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Point d'entrée : rapport sur la sortie standard et fichiers dans le dossier courant."""
     parseur = argparse.ArgumentParser(
@@ -1186,6 +1197,8 @@ def main(argv: list[str] | None = None) -> int:
                          help=f"fichier JSON de logs (défaut : {FICHIER_LOGS})")
     parseur.add_argument("--enrichir", action="store_true",
                          help="interroger VirusTotal (clé dans VT_API_KEY)")
+    parseur.add_argument("--pdf", action="store_true",
+                         help="produire aussi le rapport PDF (le rapport Word est toujours produit)")
     args = parseur.parse_args(argv)
 
     if args.enrichir:
@@ -1206,26 +1219,47 @@ def main(argv: list[str] | None = None) -> int:
         exporter_misp_csv(inv.iocs, SORTIE_MISP)
         exporter_stix(inv.iocs, SORTIE_STIX, genere_le, _valide_depuis(inv, genere_le))
         produits = [SORTIE_TXT, SORTIE_MISP, SORTIE_STIX]
-        erreur_pdf = False
+        donnees = construire_donnees_rapport(inv, genere_le)
+        erreurs = False
         try:
-            from rapport_pdf import generer_pdf
+            from rapport_word import generer_docx
         except ImportError:
-            print("\nPDF non généré : reportlab absent (pip/apt install reportlab)")
+            print("\nRapport Word non généré : python-docx absent "
+                  "(pip/apt install python-docx)")
         else:
+            logo = _chemin_logo()
+            if logo is None:
+                print(f"Avertissement : logo introuvable ({LOGO}), page de garde sans logo.",
+                      file=sys.stderr)
             try:
-                generer_pdf(SORTIE_PDF, construire_donnees_rapport(inv, genere_le))
-                produits.append(SORTIE_PDF)
+                generer_docx(SORTIE_DOCX, donnees, logo)
+                produits.append(SORTIE_DOCX)
             except OSError:
                 raise
-            except Exception as exc:  # mise en page impossible (LayoutError de reportlab…)
-                print(f"Erreur : PDF non généré : {type(exc).__name__} : {str(exc)[:300]}",
-                      file=sys.stderr)
-                erreur_pdf = True
+            except Exception as exc:  # mise en page impossible
+                print(f"Erreur : rapport Word non généré : {type(exc).__name__} : "
+                      f"{str(exc)[:300]}", file=sys.stderr)
+                erreurs = True
+        if args.pdf:
+            try:
+                from rapport_pdf import generer_pdf
+            except ImportError:
+                print("\nPDF non généré : reportlab absent (pip/apt install reportlab)")
+            else:
+                try:
+                    generer_pdf(SORTIE_PDF, donnees)
+                    produits.append(SORTIE_PDF)
+                except OSError:
+                    raise
+                except Exception as exc:  # mise en page impossible (LayoutError de reportlab…)
+                    print(f"Erreur : PDF non généré : {type(exc).__name__} : "
+                          f"{str(exc)[:300]}", file=sys.stderr)
+                    erreurs = True
     except OSError as exc:
         print(f"Erreur : écriture des fichiers de sortie impossible ({exc})", file=sys.stderr)
         return 1
     print(f"\nFichiers produits : {', '.join(produits)}")
-    return 1 if erreur_pdf else 0
+    return 1 if erreurs else 0
 
 
 if __name__ == "__main__":

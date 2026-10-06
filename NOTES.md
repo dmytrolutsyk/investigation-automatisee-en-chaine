@@ -1,6 +1,6 @@
 # Notes de conception
 
-Usage (Python ≥ 3.11) : `python3 investigation.py logs_test.json [--enrichir]` (clé VirusTotal via la variable d'environnement `VT_API_KEY`).
+Usage (Python ≥ 3.11) : `python3 investigation.py logs_test.json [--enrichir] [--pdf]` (rapport Word `rapport_incident.docx` toujours produit, PDF avec `--pdf`) (clé VirusTotal via la variable d'environnement `VT_API_KEY`).
 
 - **Seuils** : 10 échecs (4625) par IP pour la signaler, 5 comptes distincts pour parler de spraying. Le spraying vise beaucoup de comptes avec peu d'essais chacun, ce qui évite le verrouillage ; le nombre de comptes est donc le bon discriminant, pas le volume.
 - **Trois profils** : password spraying, force brute (un compte, beaucoup d'essais), et faux positif interne (compte de service dont le mot de passe a expiré). L'« interne » vient de `RESEAUX_INTERNES` (RFC 1918), pas de `ipaddress.is_private`, qui classe aussi les plages RFC 5737 de documentation comme privées.
