@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 from investigation import (ErreurChargement, Evenement, charger_logs, est_interne,
                            decoder_commande, etape1_detection, etape2_pivot,
                            etape3_chronologie, expliquer_etape1, expliquer_etape2,
-                           expliquer_etape3, formater_heure)
+                           expliquer_etape3, expliquer_etape4, etape4_plan,
+                           evaluer_gravite, formater_heure, PRIORITES, ResultatPivot)
 from tests.jeu_synthetique import (B64_GET_PROCESS, IP_BRUTE, IP_FP, IP_SPRAY_A, IP_SPRAY_B,
                                    chemin_jeu_synthetique, construire_jeu, ecrire_jeu)
 
@@ -359,3 +360,65 @@ class TestEtape3(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEtape4(unittest.TestCase):
+    def _etapes(self, supplementaires=()):
+        chemin = ecrire_jeu(construire_jeu() + list(supplementaires))
+        self.addCleanup(os.remove, chemin)
+        evts = charger_logs(chemin)
+        det = etape1_detection(evts)
+        piv = etape2_pivot(evts, det)
+        chronos = etape3_chronologie(evts, piv)
+        return det, piv, chronos
+
+    def setUp(self):
+        self.det, self.piv, self.chronos = self._etapes()
+        self.actions = etape4_plan(self.det, self.piv, self.chronos)
+
+    def test_actions_attendues(self):
+        textes = " | ".join(a.action for a in self.actions)
+        for attendu in ("Bloquer l'IP " + IP_SPRAY_A, "Bloquer l'IP " + IP_SPRAY_B,
+                        "Bloquer l'IP " + IP_BRUTE,
+                        "Isoler SRV-FILE02", "Réinitialiser le mot de passe de u.trois",
+                        "Désactiver le compte adm_tmp",
+                        "Retirer adm_tmp du groupe Admins du domaine",
+                        "Supprimer la tâche planifiée \\OneDriveSyncHelper",
+                        "Isoler WKS-205", "svc_web",
+                        "Surveiller les comptes visés (8)", "Revoir la robustesse des mots de passe des 6 comptes",
+                        "Get-Process"):
+            self.assertIn(attendu, textes)
+
+    def test_pas_d_action_sans_fait(self):
+        self.assertNotIn("journal", " ".join(a.fait + a.action for a in self.actions).lower())
+
+    def test_journal_efface(self):
+        efface = {"timestamp": "2026-05-20T09:30:00Z", "event_id": 1102, "host": "SRV-FILE02",
+                  "account": "u.trois", "src_ip": None, "logon_type": None,
+                  "result": "success", "details": {}}
+        det, piv, chronos = self._etapes([efface])
+        actions = etape4_plan(det, piv, chronos)
+        siem = [a for a in actions if "SIEM" in a.action]
+        self.assertEqual(len(siem), 1)
+        self.assertEqual(siem[0].priorite, "COURT TERME")
+        self.assertIn("journal", siem[0].fait.lower())
+
+    def test_chaque_action_a_un_fait(self):
+        self.assertTrue(all(a.fait and a.priorite in PRIORITES for a in self.actions))
+
+    def test_dedoublonnage_et_tri(self):
+        self.assertEqual(len(self.actions), len(set(self.actions)))
+        rangs = [PRIORITES.index(a.priorite) for a in self.actions]
+        self.assertEqual(rangs, sorted(rangs))
+
+    def test_gravite(self):
+        self.assertEqual(evaluer_gravite(self.piv, self.chronos), "CRITIQUE")
+        self.assertEqual(evaluer_gravite(ResultatPivot([], []), []), "FAIBLE")
+        self.assertEqual(evaluer_gravite(ResultatPivot([], self.det.suspectes), []), "MODÉRÉE")
+        self.assertEqual(evaluer_gravite(self.piv, []), "ÉLEVÉE")
+
+    def test_explication(self):
+        t = expliquer_etape4(self.actions, "CRITIQUE")
+        self.assertIn("=== ÉTAPE 4", t)
+        self.assertIn("->", t)
+        self.assertIn("CRITIQUE", t)
