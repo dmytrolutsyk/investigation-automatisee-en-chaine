@@ -16,7 +16,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.platypus import (CondPageBreak, Flowable, PageBreak, Paragraph,
-                                SimpleDocTemplate, Spacer, Table, TableStyle)
+                                KeepTogether, SimpleDocTemplate, Spacer, Table, TableStyle)
 
 # --- Charte -----------------------------------------------------------------
 MARINE = colors.HexColor("#1B2A4A")
@@ -184,6 +184,8 @@ def _ligne_etape(ligne: str, condense: bool):
                 return Paragraph(f'<font name="{POLICE_GRAS}" color="#{couleur}">'
                                  f'{_txt(libelle)}</font> {_txt(reste)}', style)
         return Paragraph(_txt(brut), S_CORPS)
+    if condense and (retrait >= 6 or brut.startswith("Note : la réputation")):
+        return None   # détail VirusTotal repris dans la section « Détail VirusTotal »
     if condense and (brut.startswith("- ") or _EN_TETE_PRIORITE.match(brut)):
         return None   # détail repris dans le tableau qui suit l'étape
     if _EN_TETE_PRIORITE.match(brut):
@@ -336,6 +338,13 @@ def generer_pdf(chemin: str, donnees: dict) -> None:
                           [88, 32, None]))
     else:
         h.append(_carte([Paragraph("Aucun indicateur extrait.", S_CORPS)]))
+    if donnees.get("details_vt"):
+        h += _section("Détail VirusTotal")
+        for d in donnees["details_vt"]:
+            bloc = [Paragraph(f"<b>{_txt(d['valeur'] + ' — ' + d['libelle'])}</b>", S_CORPS)]
+            bloc += [Paragraph(_txt(l), S_PUCE2) for l in d["lignes"]]
+            h.append(KeepTogether(bloc))
+            h.append(Spacer(1, 2 * mm))
     h.append(Spacer(1, 3 * mm))
     h.append(_carte([Paragraph(_txt(PRUDENCE), S_NOTE)], fond=colors.HexColor("#FFF8E6"),
                     bord=colors.HexColor("#F1C40F")))

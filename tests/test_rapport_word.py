@@ -111,3 +111,40 @@ class TestRapportWord(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDetailsVTWord(unittest.TestCase):
+    def test_details_vt_rendus(self):
+        from docx import Document
+        from rapport_word import generer_docx
+        d = construire_donnees_rapport(investiguer(ecrire_jeu()), GENERE_LE)
+        d["details_vt"] = [{"valeur": "203.0.113.47", "libelle": "IP d'attaque",
+                            "lignes": ["Pays : États-Unis (US)", "Fiche VirusTotal : https://x"]}]
+        chemin = os.path.join(tempfile.mkdtemp(), "r.docx")
+        generer_docx(chemin, d)
+        t = "\n".join(p.text for p in Document(chemin).paragraphs)
+        for a in ("Détail VirusTotal", "203.0.113.47 — IP d'attaque", "États-Unis (US)"):
+            self.assertIn(a, t)
+        d["details_vt"] = []
+        generer_docx(chemin, d)
+        self.assertNotIn("Détail VirusTotal",
+                         "\n".join(p.text for p in Document(chemin).paragraphs))
+
+
+class TestEtape5CondenseeWord(unittest.TestCase):
+    def test_details_vt_seulement_dans_leur_section(self):
+        from docx import Document
+        from rapport_word import generer_docx
+        d = construire_donnees_rapport(investiguer(ecrire_jeu()), GENERE_LE)
+        d["details_vt"] = [{"valeur": "203.0.113.47", "libelle": "IP d'attaque",
+                            "lignes": ["Pays : États-Unis (US)"]}]
+        for e in d["etapes"]:
+            if e["titre"].startswith("ÉTAPE 5"):
+                e["texte"] += ("\n      Pays : États-Unis (US)\n      Analyses : 1 malveillant"
+                               "\n  Note : la réputation est le score attribué par la communauté")
+        chemin = os.path.join(tempfile.mkdtemp(), "r.docx")
+        generer_docx(chemin, d)
+        t = "\n".join(p.text for p in Document(chemin).paragraphs)
+        self.assertEqual(t.count("Pays :"), 1)
+        self.assertNotIn("Analyses :", t)
+        self.assertNotIn("la réputation est le score", t)

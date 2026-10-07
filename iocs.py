@@ -231,6 +231,18 @@ def extraire_iocs(det, piv, chronos, est_interne: Callable[[str], bool] | None =
 
 # --- Export MISP ----------------------------------------------------------
 
+def _resume_vt(i: IOC) -> str:
+    """Verdict VT pour le commentaire MISP : détaillé si enrichi, sinon le statut brut."""
+    d = i.enrichissement or {}
+    if i.statut_enrichissement != "ok" or not isinstance(d, dict):
+        return str(i.statut_enrichissement)
+    total = sum(v for k, v in d.items() if isinstance(v, int) and k in (
+        "malicious", "suspicious", "harmless", "undetected", "timeout",
+        "type-unsupported", "failure", "confirmed-timeout"))
+    texte = f"{d.get('malicious') or 0}/{total} malveillant"
+    return ", ".join([texte] + [str(d[c]) for c in ("country", "as_owner") if d.get(c)])
+
+
 def exporter_misp_csv(iocs: list[IOC], chemin: str) -> None:
     """Un fichier = un événement MISP ; to_ids en 1/0, verdict VT ajouté au commentaire."""
     with open(chemin, "w", newline="", encoding="utf-8") as f:
@@ -239,7 +251,7 @@ def exporter_misp_csv(iocs: list[IOC], chemin: str) -> None:
         for i in iocs:
             commentaire = i.commentaire
             if i.statut_enrichissement:
-                commentaire += f" | VT : {i.statut_enrichissement}"
+                commentaire += f" | VT : {_resume_vt(i)}"
             w.writerow([i.valeur, i.type_misp, i.categorie_misp, 1 if i.to_ids else 0,
                         commentaire])
 

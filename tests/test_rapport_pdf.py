@@ -275,3 +275,20 @@ class TestMainWord(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDetailsVTPdf(_Base):
+    def test_details_vt_pdf(self):
+        import shutil as sh, subprocess
+        from rapport_pdf import generer_pdf
+        d = construire_donnees_rapport(investiguer(self.jeu()), GENERE_LE)
+        self.assertEqual(d["details_vt"], [])
+        d["details_vt"] = [{"valeur": "203.0.113.47", "libelle": "IP d'attaque",
+                            "lignes": ["Pays : États-Unis (US) <b>", "Fiche VirusTotal : https://x"]}]
+        chemin = os.path.join(self.dossier, "r.pdf")
+        generer_pdf(chemin, d)
+        self.assertTrue(os.path.getsize(chemin) > 1000)
+        if sh.which("pdftotext"):
+            t = subprocess.run(["pdftotext", chemin, "-"], capture_output=True, text=True).stdout
+            self.assertIn("Détail VirusTotal", t)
+            self.assertIn("203.0.113.47", t)

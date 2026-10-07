@@ -168,6 +168,21 @@ class TestClientVT(Base):
         self.assertEqual((r.statut, len(self.appels), r.donnees["malicious"]), ("ok", 1, 3))
         self.assertFalse(os.path.exists(self.cache + ".tmp"))
 
+    def test_sans_cache_disque(self):
+        # chemin_cache=None : rien n'est écrit, chaque exécution réinterroge VT ;
+        # une même valeur n'est demandée qu'une fois au cours d'une exécution.
+        self.reponses = [ok_json(), ok_json()]
+        c = ClientVT("K", None, urlopen=self.urlopen, horloge=lambda: self.t[0],
+                     dormir=self.sommeils.append)
+        c.consulter("ip-src", "8.8.4.4")
+        c.consulter("ip-src", "8.8.4.4")
+        self.assertEqual(len(self.appels), 1)
+        c2 = ClientVT("K", None, urlopen=self.urlopen, horloge=lambda: self.t[0],
+                      dormir=self.sommeils.append)
+        r = c2.consulter("ip-src", "8.8.4.4")
+        self.assertEqual((r.statut, len(self.appels)), ("ok", 2))
+        self.assertEqual(os.listdir(self.dossier), [])
+
     def test_cache_expire(self):
         self.reponses = [ok_json(), ok_json()]
         c = self.client()
@@ -215,3 +230,80 @@ class TestClientVT(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def ok_riche(**extra):
+    res = {f"Moteur{c}": {"category": "harmless", "result": "clean"} for c in "XYZ"}
+    res["ZetaAV"] = {"category": "malicious", "result": "malware"}
+    res["CyRadar"] = {"category": "malicious", "result": "malware"}
+    res["Susp"] = {"category": "suspicious", "result": "phishing"}
+    return ok_json(country="US", asn=14618, as_owner="Amazon.com, Inc.",
+                   network="50.16.0.0/14", last_analysis_results=res,
+                   total_votes={"harmless": 0, "malicious": 2}, reputation=-3,
+                   tags=["scanner"], **extra)
+
+
+class TestDetailsVT(Base):
+    def test_extraire_garde_details(self):
+        self.reponses = [ok_riche()]
+        d = self.client().consulter("ip-src", "50.16.16.211").donnees
+        self.assertEqual((d["asn"], d["network"], d["tags"]), (14618, "50.16.0.0/14", ["scanner"]))
+        self.assertEqual(d["total_votes"], {"harmless": 0, "malicious": 2})
+        self.assertEqual([m["moteur"] for m in d["moteurs"]], ["CyRadar", "Susp", "ZetaAV"])
+        self.assertEqual(d["nb_moteurs_signales"], 3)
+        self.assertEqual(d["lien"], "https://www.virustotal.com/gui/ip-address/50.16.16.211")
+
+    def test_moteurs_plafonnes(self):
+        res = {f"M{n:02d}": {"category": "malicious", "result": "x"} for n in range(20)}
+        self.reponses = [ok_json(last_analysis_results=res)]
+        d = self.client().consulter("domain", "a.fr").donnees
+        self.assertEqual((len(d["moteurs"]), d["nb_moteurs_signales"]), (15, 20))
+
+    def test_champs_absents_non_conserves(self):
+        self.reponses = [ok_json()]
+        d = self.client().consulter("md5", "a" * 32).donnees
+        for cle in ("asn", "moteurs", "tags", "total_votes"):
+            self.assertNotIn(cle, d)
+        self.assertTrue(d["lien"].endswith("/file/" + "a" * 32))
+
+
+def ioc_enrichi(corps, valeur="50.16.16.211"):
+    i = IOC(type_misp="ip-src", valeur=valeur, categorie_misp="Network activity",
+            commentaire="c", to_ids=True)
+    c = ClientVT("K", None, urlopen=lambda req, timeout=None: corps)
+    enrichir_iocs([i], c)
+    return i
+
+
+class TestAffichageDetails(unittest.TestCase):
+    def test_texte_etape5(self):
+        from investigation import expliquer_etape5
+        i = ioc_enrichi(ok_riche())
+        t = expliquer_etape5([i], {"ok": 1})
+        for attendu in ("États-Unis (US)", "AS14618", "CyRadar (malveillant : malware)",
+                        "Susp (suspect : phishing)", "Fiche VirusTotal",
+                        "14/11/2023 22:13 UTC", "50.16.0.0/14", "Amazon.com, Inc.",
+                        "Réputation communautaire : -3", "2 malveillants", "scanner",
+                        "3 malveillants, 1 suspect, 50 sans danger, 10 non détectés"):
+            self.assertIn(attendu, t)
+        self.assertEqual(t.count("la réputation est le score"), 1)
+
+    def test_donnees_absentes_pas_de_ligne_vide(self):
+        from investigation import _lignes_detail_vt
+        i = ioc_enrichi(Reponse(json.dumps({"data": {"attributes": {
+            "last_analysis_stats": {"malicious": 0, "harmless": 5}}}}).encode()))
+        lignes = _lignes_detail_vt(i)
+        self.assertTrue(all(l.strip() for l in lignes))
+        self.assertFalse(any(l.startswith(("Pays", "Moteurs", "Réputation")) for l in lignes))
+
+    def test_pays_inconnu_repli_code(self):
+        from investigation import _pays
+        self.assertEqual(_pays("ZZ"), "ZZ")
+
+    def test_commentaire_misp(self):
+        from iocs import exporter_misp_csv
+        i = ioc_enrichi(ok_riche())
+        chemin = os.path.join(tempfile.mkdtemp(), "m.csv")
+        exporter_misp_csv([i], chemin)
+        with open(chemin, encoding="utf-8") as f:
+            self.assertIn("VT : 3/64 malveillant, US, Amazon.com, Inc.", f.read())

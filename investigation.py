@@ -86,8 +86,9 @@ SORTIE_MISP = "iocs_misp.csv"
 SORTIE_STIX = "iocs_stix.json"
 
 # VirusTotal
-VT_CACHE = "cache_vt.json"
-VT_TTL_HEURES = 24
+VT_CACHE = None     # None : interrogation en direct à chaque exécution (aucun fichier) ;
+                    # mettre un chemin (ex. "cache_vt.json") pour garder les réponses
+VT_TTL_HEURES = 24  # durée de validité du cache disque, s'il est activé
 VT_INTERVALLE_S = 15
 VT_TIMEOUT_S = 10
 VT_MAX_ESSAIS = 3
@@ -913,6 +914,105 @@ def _verdict_vt(ioc) -> str:
         ioc.statut_enrichissement, str(ioc.statut_enrichissement))
 
 
+# Pays courants : code ISO 3166 alpha-2 → nom français (repli : le code seul)
+_PAYS = {
+    "US": "États-Unis", "FR": "France", "DE": "Allemagne", "NL": "Pays-Bas",
+    "GB": "Royaume-Uni", "RU": "Russie", "CN": "Chine", "UA": "Ukraine", "BR": "Brésil",
+    "IN": "Inde", "JP": "Japon", "KR": "Corée du Sud", "KP": "Corée du Nord",
+    "IR": "Iran", "CA": "Canada", "IT": "Italie", "ES": "Espagne", "PL": "Pologne",
+    "RO": "Roumanie", "BG": "Bulgarie", "SE": "Suède", "CH": "Suisse", "BE": "Belgique",
+    "SG": "Singapour", "HK": "Hong Kong", "TW": "Taïwan", "VN": "Viêt Nam",
+    "TR": "Turquie", "IL": "Israël", "ZA": "Afrique du Sud", "AU": "Australie",
+    "MX": "Mexique", "AR": "Argentine", "ID": "Indonésie", "TH": "Thaïlande",
+    "MY": "Malaisie", "SC": "Seychelles", "PA": "Panama", "LT": "Lituanie",
+    "LV": "Lettonie", "MD": "Moldavie", "KZ": "Kazakhstan", "BY": "Biélorussie",
+}
+_CATEGORIES_VT = {"malicious": "malveillant", "suspicious": "suspect",
+                  "harmless": "sans danger", "undetected": "non détecté"}
+EXPLICATION_REPUTATION = (
+    "  Note : la réputation est le score attribué par la communauté VirusTotal ; "
+    "un score négatif signifie que l'élément est jugé malveillant.")
+
+
+def _pays(code) -> str:
+    code = str(code).upper()
+    return f"{_PAYS[code]} ({code})" if code in _PAYS else code
+
+
+def _date_vt(epoch) -> str:
+    return f"{datetime.fromtimestamp(epoch, timezone.utc):%d/%m/%Y %H:%M} UTC"
+
+
+def _lignes_detail_vt(ioc) -> list:
+    """Lignes de détail VirusTotal (français clair) d'un IOC enrichi ; vides si absentes."""
+    d = ioc.enrichissement or {}
+    if ioc.statut_enrichissement != "ok" or not isinstance(d, dict):
+        return []
+    lignes = []
+    reseau = []
+    if d.get("as_owner"):
+        reseau.append(f"opérateur réseau : {d['as_owner']}")
+    asn = []
+    if d.get("asn"):
+        asn.append(f"AS{d['asn']}")
+    if d.get("network"):
+        asn.append(f"réseau {d['network']}")
+    if d.get("country") or reseau or asn:
+        txt = f"Pays : {_pays(d['country'])}" if d.get("country") else ""
+        if reseau or asn:
+            op = reseau[0] if reseau else "réseau"
+            if reseau:
+                txt += (" — " if txt else "") + op
+                if asn:
+                    txt += f" ({', '.join(asn)})"
+            else:
+                txt += (" — " if txt else "") + ", ".join(asn)
+        lignes.append(txt)
+    if d.get("type_description") or d.get("meaningful_name"):
+        lignes.append("Fichier : " + " — ".join(
+            str(d[c]) for c in ("meaningful_name", "type_description") if d.get(c)))
+    if any(isinstance(d.get(k), int) for k in _STATS_VT):
+        total = sum(v for k, v in d.items() if k in _STATS_VT and isinstance(v, int))
+        nb = lambda k: d.get(k) or 0
+        morceaux = [_pl(nb("malicious"), "malveillant", "malveillants"),
+                    _pl(nb("suspicious"), "suspect", "suspects"),
+                    f"{nb('harmless')} sans danger",
+                    _pl(nb("undetected"), "non détecté", "non détectés")]
+        txt = f"Analyses : {', '.join(morceaux)} ({total} moteurs)"
+        if d.get("last_analysis_date"):
+            txt += f" — dernière analyse le {_date_vt(d['last_analysis_date'])}"
+        lignes.append(txt)
+    if d.get("moteurs"):
+        sig = []
+        for m in d["moteurs"]:
+            cat = _CATEGORIES_VT.get(m.get("categorie"), m.get("categorie") or "")
+            sig.append(f"{m['moteur']} ({cat}{' : ' + m['resultat'] if m.get('resultat') else ''})")
+        txt = "Moteurs qui la signalent : " + ", ".join(sig)
+        reste = (d.get("nb_moteurs_signales") or 0) - len(d["moteurs"])
+        if reste > 0:
+            txt += f" et {reste} autre{'s' if reste > 1 else ''}"
+        lignes.append(txt)
+    comm = []
+    if d.get("reputation") is not None:
+        comm.append(f"Réputation communautaire : {d['reputation']}")
+    votes = d.get("total_votes")
+    if isinstance(votes, dict):
+        v = (f"votes : {votes.get('malicious') or 0} malveillants, "
+             f"{votes.get('harmless') or 0} sans danger")
+        comm.append(f"({v})" if comm else f"Votes de la communauté : {v}")
+    txt = " ".join(comm)
+    if d.get("tags"):
+        txt += (" — " if txt else "") + "étiquettes : " + ", ".join(map(str, d["tags"]))
+    if txt:
+        lignes.append(txt)
+    if d.get("categories") and isinstance(d["categories"], dict):
+        lignes.append("Catégories : " + ", ".join(
+            sorted({str(c) for c in d["categories"].values()})))
+    if d.get("lien"):
+        lignes.append(f"Fiche VirusTotal : {d['lien']}")
+    return lignes
+
+
 def expliquer_etape5(iocs: list, comptage_vt: dict | None) -> str:
     """Explication en français, destinée à un lecteur non technique."""
     lignes = ["=== ÉTAPE 5 : IOC ET ENRICHISSEMENT ==="]
@@ -937,6 +1037,12 @@ def expliquer_etape5(iocs: list, comptage_vt: dict | None) -> str:
             if comptage_vt is not None and i.statut_enrichissement:
                 ligne += f"  → {_verdict_vt(i)}"
             lignes.append(ligne)
+            if comptage_vt is not None:
+                lignes += [f"      {l}" for l in _lignes_detail_vt(i)]
+        if comptage_vt is not None and any(
+                (i.enrichissement or {}).get("reputation") is not None
+                for i in iocs if i.statut_enrichissement == "ok"):
+            lignes.append(EXPLICATION_REPUTATION)
     if comptage_vt is None:
         lignes.append("  Vérification VirusTotal : enrichissement non demandé (option --enrichir).")
     else:
@@ -1169,6 +1275,9 @@ def construire_donnees_rapport(inv: Investigation, genere_le: datetime) -> dict:
         "iocs": [[i.valeur, _libelle_ioc(i),
                   _verdict_vt(i) if i.statut_enrichissement else "non vérifié"]
                  for i in inv.iocs],
+        "details_vt": [{"valeur": i.valeur, "libelle": _libelle_ioc(i),
+                        "lignes": _lignes_detail_vt(i)}
+                       for i in inv.iocs if _lignes_detail_vt(i)],
         "genere_le": f"{genere_le.astimezone(timezone.utc):%d/%m/%Y à %H:%M} UTC",
     }
 

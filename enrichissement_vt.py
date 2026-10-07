@@ -1,6 +1,8 @@
 """Enrichissement VirusTotal (API v3) : consultation seule, jamais d'upload.
 
-Module autonome (stdlib uniquement) : cache disque, limitation de débit,
+Module autonome (stdlib uniquement) : interrogation en direct à chaque
+exécution (une même valeur n'est demandée qu'une fois par exécution), cache
+disque optionnel (désactivé si chemin_cache vaut None), limitation de débit,
 retry sur 429, arrêt propre sur clé refusée.
 """
 from __future__ import annotations
@@ -17,6 +19,8 @@ import urllib.request
 from dataclasses import dataclass
 
 VT_URL = "https://www.virustotal.com/api/v3"
+VT_GUI = "https://www.virustotal.com/gui"
+MAX_MOTEURS = 15  # moteurs détaillés au plus ; le total reste dans nb_moteurs_signales
 
 TYPES_VT = {
     "ip-src": "ip_addresses", "ip-dst": "ip_addresses",
@@ -56,6 +60,9 @@ class ClientVT:
 
     # --- cache -----------------------------------------------------------
     def _charger_cache(self):
+        # Sans fichier de cache : mémoire seule, vidée à chaque exécution.
+        if self.chemin_cache is None:
+            return {}
         try:
             with open(self.chemin_cache, encoding="utf-8") as f:
                 cache = json.load(f)
@@ -64,6 +71,8 @@ class ClientVT:
             return {}
 
     def _ecrire_cache(self):
+        if self.chemin_cache is None:
+            return
         tmp = self.chemin_cache + ".tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as f:
@@ -117,7 +126,33 @@ class ClientVT:
         donnees = dict(attrs.get("last_analysis_stats") or {})
         for champ in ("reputation", "country", "as_owner", "last_analysis_date"):
             donnees[champ] = attrs.get(champ)
+        # Détails complémentaires : conservés seulement s'ils sont présents
+        for champ in ("asn", "network", "continent", "regional_internet_registry",
+                      "tags", "total_votes", "categories", "type_description",
+                      "meaningful_name"):
+            if attrs.get(champ) not in (None, "", [], {}):
+                donnees[champ] = attrs[champ]
+        # Moteurs ayant signalé l'objet (malveillant ou suspect), triés, plafonnés à 15
+        signales = sorted(
+            ({"moteur": nom, "categorie": r.get("category"), "resultat": r.get("result")}
+             for nom, r in (attrs.get("last_analysis_results") or {}).items()
+             if isinstance(r, dict) and r.get("category") in ("malicious", "suspicious")),
+            key=lambda m: m["moteur"])
+        if signales:
+            donnees["moteurs"] = signales[:MAX_MOTEURS]
+            donnees["nb_moteurs_signales"] = len(signales)
         return donnees
+
+    @staticmethod
+    def _lien(type_misp, valeur):
+        """Fiche de l'objet dans l'interface web VirusTotal."""
+        if type_misp in ("ip-src", "ip-dst"):
+            return f"{VT_GUI}/ip-address/{valeur}"
+        if type_misp == "domain":
+            return f"{VT_GUI}/domain/{valeur}"
+        if type_misp == "url":
+            return f"{VT_GUI}/url/{ClientVT._identifiant('url', valeur)}"
+        return f"{VT_GUI}/file/{valeur}"
 
     def consulter(self, type_misp, valeur):
         if type_misp not in TYPES_VT:
@@ -147,7 +182,9 @@ class ClientVT:
             try:
                 with self._urlopen(req, timeout=self.timeout_s) as rep:
                     corps = rep.read()
-                resultat = ResultatVT("ok", self._extraire(corps))
+                donnees = self._extraire(corps)
+                donnees["lien"] = self._lien(type_misp, valeur)
+                resultat = ResultatVT("ok", donnees)
                 return self._memoriser(cle_cache, resultat)
             except urllib.error.HTTPError as e:
                 e.close()  # libère la réponse d'erreur

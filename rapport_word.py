@@ -233,6 +233,8 @@ def _ligne_etape(doc, ligne: str, condense: bool) -> None:
                 return
         _para(doc, _txt(brut))
         return
+    if condense and (retrait >= 6 or brut.startswith("Note : la réputation")):
+        return   # détail VirusTotal repris dans la section « Détail VirusTotal »
     if condense and (brut.startswith("- ") or _EN_TETE_PRIORITE.match(brut)):
         return   # détail repris dans le tableau qui suit l'étape
     if _EN_TETE_PRIORITE.match(brut):
@@ -377,6 +379,14 @@ def generer_docx(chemin: str, donnees: dict, logo: str | None = None) -> None:
                  [8.2, 3.2, None])
     else:
         _para(doc, "Aucun indicateur extrait.")
+    if donnees.get("details_vt"):
+        _section(doc, "Détail VirusTotal")
+        for d in donnees["details_vt"]:
+            p = _para(doc, "", avant=4, apres=1)
+            p.paragraph_format.keep_with_next = True
+            _run(p, _txt(f"{d['valeur']} — {d['libelle']}"), 9.5, gras=True, couleur=MARINE)
+            for ligne in d["lignes"]:
+                _para(doc, _txt(ligne), 8.5, retrait=0.5, apres=1)
     _para(doc, PRUDENCE, 8.5, italique=True, couleur=GRIS, avant=8, fond="FFF8E6")
 
     doc.save(chemin)
