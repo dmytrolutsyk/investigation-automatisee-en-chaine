@@ -40,6 +40,23 @@ class TestRapportWord(unittest.TestCase):
                 morceaux += [c.text for c in ligne.cells]
         return "\n".join(morceaux)
 
+    def test_charte_couleurs_et_police(self):
+        # Couleurs et police relevées sur la charte Formind ; repli Arial déclaré.
+        from docx.oxml.ns import qn
+        from lxml import etree
+        doc = self.generer()
+        corps = etree.tostring(doc.element).decode()
+        self.assertIn('w:fill="002236"', corps)
+        self.assertIn('w:fill="0089A4"', corps)
+        self.assertNotIn("1B2A4A", corps)
+        self.assertEqual(doc.styles["Normal"].font.name, "Poppins")
+        table = next(r.target_part for r in doc.part.rels.values()
+                     if r.reltype.endswith("/fontTable"))
+        racine = etree.fromstring(table.blob)
+        poppins = [f for f in racine.findall(qn("w:font")) if f.get(qn("w:name")) == "Poppins"]
+        self.assertEqual(len(poppins), 1)
+        self.assertEqual(poppins[0].find(qn("w:altName")).get(qn("w:val")), "Arial")
+
     def test_contenu_principal(self):
         t = self.texte(self.generer())
         for attendu in ("Rapport d'incident de sécurité",

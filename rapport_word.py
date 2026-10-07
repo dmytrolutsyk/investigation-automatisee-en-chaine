@@ -2,7 +2,7 @@
 
 Ce module ne fait que la mise en page : les textes arrivent déjà rédigés dans
 le dictionnaire produit par investigation.construire_donnees_rapport. Même
-contenu et même ordre que le PDF (rapport_pdf), avec une page de garde.
+contenu organisé en sections, avec une page de garde.
 """
 import os
 import re
@@ -19,13 +19,14 @@ from affichage import (DECOMPTE_IOC as _DECOMPTE_IOC, EN_TETE_PRIORITE as _EN_TE
                        LIBELLES as _LIBELLES, PRUDENCE, tronquer)
 
 # --- Charte -----------------------------------------------------------------
-MARINE, TURQUOISE = "1B2A4A", "1FA3A8"
+MARINE, TURQUOISE = "002236", "0089A4"   # relevés sur la charte Formind
 LIGNE_CLAIRE, FOND_ALERTE, ALERTE = "F2F7F8", "FBEAE8", "C0392B"
 TEXTE, GRIS = "22303C", "6B7A86"
 COULEURS_GRAVITE = {"CRITIQUE": "C0392B", "ÉLEVÉE": "E67E22", "MODÉRÉE": "F1C40F",
                     "FAIBLE": "27AE60"}
-COULEURS_PRIORITE = {"IMMÉDIAT": "C0392B", "COURT TERME": "E67E22", "SUIVI": "1FA3A8"}
-POLICE = "Arial"
+COULEURS_PRIORITE = {"IMMÉDIAT": "C0392B", "COURT TERME": "E67E22", "SUIVI": TURQUOISE}
+POLICE = "Poppins"          # police de la charte Formind
+POLICE_REPLI = "Arial"      # proposée par Word si Poppins n'est pas installée
 LARGEUR_UTILE_CM = 17.0   # A4 (21 cm) moins deux marges de 2 cm
 MOIS = ("janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
         "septembre", "octobre", "novembre", "décembre")
@@ -151,6 +152,27 @@ def _champ(p, code: str, taille=7.5) -> None:
         p._p.append(r)
 
 
+def _declarer_repli(doc) -> None:
+    """Déclare POLICE dans la table des polices avec POLICE_REPLI comme nom
+    alternatif : Word l'utilise si Poppins n'est pas installée sur le poste."""
+    from lxml import etree
+    for rel in doc.part.rels.values():
+        if not rel.reltype.endswith("/fontTable"):
+            continue
+        part = rel.target_part
+        racine = etree.fromstring(part.blob)
+        if any(f.get(qn("w:name")) == POLICE for f in racine.findall(qn("w:font"))):
+            return
+        police = etree.SubElement(racine, qn("w:font"))
+        police.set(qn("w:name"), POLICE)
+        for balise, valeur in (("w:altName", POLICE_REPLI), ("w:family", "swiss"),
+                               ("w:pitch", "variable")):
+            etree.SubElement(police, qn(balise)).set(qn("w:val"), valeur)
+        part._blob = etree.tostring(racine, xml_declaration=True, encoding="UTF-8",
+                                    standalone=True)
+        return
+
+
 def _pied(section, genere_le: str) -> None:
     """Pied des pages courantes ; celui de la page de garde reste vide."""
     section.different_first_page_header_footer = True
@@ -213,7 +235,7 @@ def _tableau(doc, entetes, lignes, largeurs_cm, colonnes_gras=(), couleurs=None,
 
 # --- Étapes -----------------------------------------------------------------
 def _ligne_etape(doc, ligne: str, condense: bool) -> None:
-    """Ajoute le paragraphe d'une ligne d'explication (mêmes règles que le PDF)."""
+    """Ajoute le paragraphe d'une ligne d'explication (Recherche, Résultat, conclusion, lignes [!])."""
     retrait = len(ligne) - len(ligne.lstrip(" "))
     brut = ligne.strip()
     if not brut:
@@ -313,6 +335,7 @@ def generer_docx(chemin: str, donnees: dict, logo: str | None = None) -> None:
     rfonts = normal.element.get_or_add_rPr().get_or_add_rFonts()
     for attr in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
         rfonts.set(qn(attr), POLICE)
+    _declarer_repli(doc)
     for zoom in doc.settings.element.findall(qn("w:zoom")):   # gabarit python-docx : percent manquant
         zoom.set(qn("w:percent"), "100")
     cp = doc.core_properties

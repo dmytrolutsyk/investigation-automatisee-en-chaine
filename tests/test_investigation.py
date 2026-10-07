@@ -651,7 +651,7 @@ class TestBoutEnBout(_DossierTemporaire):
 
     def test_aucune_valeur_en_dur(self):
         sources = ""
-        for f in ("investigation.py", "iocs.py", "enrichissement_vt.py", "rapport_pdf.py"):
+        for f in ("investigation.py", "iocs.py", "enrichissement_vt.py", "rapport_word.py", "affichage.py"):
             if os.path.exists(os.path.join(RACINE, f)):
                 with open(os.path.join(RACINE, f), encoding="utf-8") as fic:
                     sources += fic.read()

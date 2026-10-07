@@ -1,4 +1,4 @@
-"""Aides d'affichage communes aux rapports PDF et Word (bibliothèque standard seule)."""
+"""Aides d'affichage du rapport Word (bibliothèque standard seule)."""
 import re
 
 # Au-delà, un texte (ligne de commande encodée…) est tronqué à l'affichage : une

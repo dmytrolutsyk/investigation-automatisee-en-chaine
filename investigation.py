@@ -12,13 +12,12 @@ de bout en bout, chaque étape s'appuyant sur les conclusions de la précédente
     5. IOC : extraction, enrichissement VirusTotal optionnel, exports MISP/STIX.
 
 Usage :
-    python3 investigation.py [logs.json] [--enrichir] [--pdf]
-    (défaut : FICHIER_LOGS ; --enrichir interroge VirusTotal, clé dans VT_API_KEY ;
-    --pdf produit en plus le rapport PDF)
+    python3 investigation.py [logs.json] [--enrichir]
+    (défaut : FICHIER_LOGS ; --enrichir interroge VirusTotal, clé dans VT_API_KEY)
 
 Sorties (dossier courant) : rapport texte (affiché et sortie_rapport.txt),
-rapport_incident.docx (Word, python-docx ; rapport_incident.pdf en plus avec --pdf,
-reportlab), iocs_misp.csv (MISP) et iocs_stix.json (STIX 2.1).
+rapport_incident.docx (Word, python-docx), iocs_misp.csv (MISP) et
+iocs_stix.json (STIX 2.1).
 Toutes les heures sont en UTC. Python 3.11 ou plus récent.
 
 Paramètres : seuils, réseaux internes, marqueurs de commandes suspectes,
@@ -79,7 +78,6 @@ GROUPES_PRIVILEGIES = {"administrateurs", "administrators", "admins du domaine",
 
 # Chemins de sortie
 SORTIE_TXT = "sortie_rapport.txt"
-SORTIE_PDF = "rapport_incident.pdf"
 SORTIE_DOCX = "rapport_incident.docx"
 LOGO = "Logo.png"   # relatif au dossier du script ; absent : page de garde sans logo
 SORTIE_MISP = "iocs_misp.csv"
@@ -1108,7 +1106,7 @@ def _periode(inv: Investigation, separateur: str = " → ") -> str:
 
 
 def _explications(inv: Investigation) -> list[str]:
-    """Textes des étapes 1 à 5, communs au rapport texte et au PDF."""
+    """Textes des étapes 1 à 5, communs au rapport texte et au rapport Word."""
     return [
         expliquer_etape1(inv.det, inv.multi_jours),
         expliquer_etape2(inv.piv, inv.multi_jours),
@@ -1133,7 +1131,7 @@ def rapport_texte(inv: Investigation) -> str:
     return "\n\n".join([en_tete, *_explications(inv)]) + "\n"
 
 
-# --- Données du rapport PDF -------------------------------------------------
+# --- Données du rapport Word ------------------------------------------------
 _LIBELLES_ROLE = {
     "ip_attaque": "IP d'attaque", "compte_compromis": "compte compromis",
     "machine": "machine touchée", "compte_cree": "compte créé",
@@ -1241,7 +1239,7 @@ def _synthese(inv: Investigation) -> list[str]:
 
 
 def construire_donnees_rapport(inv: Investigation, genere_le: datetime) -> dict:
-    """Données du rapport PDF, déjà rédigées : rapport_pdf ne fait que la mise en page."""
+    """Données du rapport Word, déjà rédigées : rapport_word ne fait que la mise en page."""
     def h(dt):
         return formater_heure(dt, inv.multi_jours)
 
@@ -1306,8 +1304,6 @@ def main(argv: list[str] | None = None) -> int:
                          help=f"fichier JSON de logs (défaut : {FICHIER_LOGS})")
     parseur.add_argument("--enrichir", action="store_true",
                          help="interroger VirusTotal (clé dans VT_API_KEY)")
-    parseur.add_argument("--pdf", action="store_true",
-                         help="produire aussi le rapport PDF (le rapport Word est toujours produit)")
     args = parseur.parse_args(argv)
 
     if args.enrichir:
@@ -1349,21 +1345,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Erreur : rapport Word non généré : {type(exc).__name__} : "
                       f"{str(exc)[:300]}", file=sys.stderr)
                 erreurs = True
-        if args.pdf:
-            try:
-                from rapport_pdf import generer_pdf
-            except ImportError:
-                print("\nPDF non généré : reportlab absent (pip/apt install reportlab)")
-            else:
-                try:
-                    generer_pdf(SORTIE_PDF, donnees)
-                    produits.append(SORTIE_PDF)
-                except OSError:
-                    raise
-                except Exception as exc:  # mise en page impossible (LayoutError de reportlab…)
-                    print(f"Erreur : PDF non généré : {type(exc).__name__} : "
-                          f"{str(exc)[:300]}", file=sys.stderr)
-                    erreurs = True
     except OSError as exc:
         print(f"Erreur : écriture des fichiers de sortie impossible ({exc})", file=sys.stderr)
         return 1
