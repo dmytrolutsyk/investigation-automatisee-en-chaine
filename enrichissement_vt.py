@@ -1,17 +1,15 @@
 """Enrichissement VirusTotal (API v3) : consultation seule, jamais d'upload.
 
 Module autonome (stdlib uniquement) : interrogation en direct à chaque
-exécution (une même valeur n'est demandée qu'une fois par exécution), cache
-disque optionnel (désactivé si chemin_cache vaut None), limitation de débit,
-retry sur 429, arrêt propre sur clé refusée.
+exécution, sans cache disque (une même valeur n'est demandée qu'une fois au
+cours d'une exécution), limitation de débit, retry sur 429, arrêt propre sur
+clé refusée.
 """
 from __future__ import annotations
 
 import base64
 import ipaddress
 import json
-import os
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -42,12 +40,9 @@ class ResultatVT:
 
 
 class ClientVT:
-    def __init__(self, cle, chemin_cache, ttl_heures=24, intervalle_s=15,
-                 timeout_s=10, max_essais=3, urlopen=urllib.request.urlopen,
-                 horloge=time.time, dormir=time.sleep):
+    def __init__(self, cle, intervalle_s=15, timeout_s=10, max_essais=3,
+                 urlopen=urllib.request.urlopen, horloge=time.time, dormir=time.sleep):
         self.cle = cle
-        self.chemin_cache = chemin_cache
-        self.ttl_s = ttl_heures * 3600
         self.intervalle_s = intervalle_s
         self.timeout_s = timeout_s
         self.max_essais = max_essais
@@ -56,44 +51,9 @@ class ClientVT:
         self._dormir = dormir
         self._dernier = None  # instant de la dernière requête réelle
         self._desactive = False
-        self._cache = self._charger_cache()
-
-    # --- cache -----------------------------------------------------------
-    def _charger_cache(self):
-        # Sans fichier de cache : mémoire seule, vidée à chaque exécution.
-        if self.chemin_cache is None:
-            return {}
-        try:
-            with open(self.chemin_cache, encoding="utf-8") as f:
-                cache = json.load(f)
-            return cache if isinstance(cache, dict) else {}
-        except (OSError, ValueError):
-            return {}
-
-    def _ecrire_cache(self):
-        if self.chemin_cache is None:
-            return
-        tmp = self.chemin_cache + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._cache, f, ensure_ascii=False)
-            os.replace(tmp, self.chemin_cache)
-        except OSError as e:
-            print(f"Avertissement : cache VirusTotal non écrit ({e.strerror}).",
-                  file=sys.stderr)
-
-    def _depuis_cache(self, cle_cache):
-        e = self._cache.get(cle_cache)
-        if not isinstance(e, dict):
-            return None
-        try:
-            if self._horloge() - float(e["horodatage"]) >= self.ttl_s:
-                return None
-            statut, donnees = e["statut"], e.get("donnees")
-        except (KeyError, TypeError, ValueError):
-            return None
-        message = "inconnu de VirusTotal" if statut == "inconnu" else ""
-        return ResultatVT(statut, donnees, message)
+        # Réponses déjà obtenues pendant cette exécution (mémoire seule, rien
+        # n'est écrit sur le disque) : une même valeur n'est demandée qu'une fois.
+        self._deja_vus: dict[str, ResultatVT] = {}
 
     # --- API -------------------------------------------------------------
     @staticmethod
@@ -161,16 +121,15 @@ class ClientVT:
             motif = self._non_soumise(valeur)
             if motif:
                 return ResultatVT("non_soumis", None, motif)
-        # Clé invalide : prioritaire sur le cache, l'enrichissement est arrêté net.
+        # Clé invalide : l'enrichissement est arrêté net pour toutes les valeurs.
         if self._desactive:
             return ResultatVT("cle_invalide", None, "clé refusée par VirusTotal (401)")
         if not self.cle:
             return ResultatVT("cle_absente", None,
                               "clé VT_API_KEY absente : enrichissement non effectué")
-        cle_cache = f"{type_misp}:{valeur}"
-        en_cache = self._depuis_cache(cle_cache)
-        if en_cache is not None:
-            return en_cache
+        cle_vue = f"{type_misp}:{valeur}"
+        if cle_vue in self._deja_vus:
+            return self._deja_vus[cle_vue]
 
         url = f"{VT_URL}/{TYPES_VT[type_misp]}/{self._identifiant(type_misp, valeur)}"
         dernier_code = None
@@ -185,13 +144,13 @@ class ClientVT:
                 donnees = self._extraire(corps)
                 donnees["lien"] = self._lien(type_misp, valeur)
                 resultat = ResultatVT("ok", donnees)
-                return self._memoriser(cle_cache, resultat)
+                return self._memoriser(cle_vue, resultat)
             except urllib.error.HTTPError as e:
                 e.close()  # libère la réponse d'erreur
                 dernier_code = e.code
                 if e.code == 404:
                     return self._memoriser(
-                        cle_cache, ResultatVT("inconnu", None, "inconnu de VirusTotal"))
+                        cle_vue, ResultatVT("inconnu", None, "inconnu de VirusTotal"))
                 if e.code in (401, 403):
                     self._desactive = True
                     return ResultatVT("cle_invalide", None,
@@ -210,11 +169,8 @@ class ClientVT:
         return ResultatVT("indisponible", None,
                           f"VirusTotal indisponible après {self.max_essais} essais ({dernier_code})")
 
-    def _memoriser(self, cle_cache, resultat):
-        self._cache[cle_cache] = {"horodatage": self._horloge(),
-                                  "statut": resultat.statut,
-                                  "donnees": resultat.donnees}
-        self._ecrire_cache()
+    def _memoriser(self, cle_vue, resultat):
+        self._deja_vus[cle_vue] = resultat
         return resultat
 
 

@@ -626,7 +626,7 @@ class TestBoutEnBout(_DossierTemporaire):
 
     def test_enrichissement_injecte(self):
         inv = investiguer(self.jeu(), enrichir=True,
-                          client_vt=ClientVT(None, os.path.join(self.dossier, "c.json")))
+                          client_vt=ClientVT(None))
         c = inv.comptage_vt
         self.assertEqual(sum(c.values()), len(inv.iocs))
         self.assertEqual(c["non_soumis"], 3)   # trois IP de documentation RFC 5737

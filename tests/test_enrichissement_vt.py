@@ -40,7 +40,6 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.dossier = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dossier, True)
-        self.cache = os.path.join(self.dossier, "cache.json")
         self.appels = []
         self.sommeils = []
         self.t = [1000.0]
@@ -55,7 +54,7 @@ class Base(unittest.TestCase):
         return r
 
     def client(self, cle="K", **kw):
-        return ClientVT(cle, self.cache, urlopen=self.urlopen,
+        return ClientVT(cle, urlopen=self.urlopen,
                         horloge=lambda: self.t[0],
                         dormir=self.sommeils.append, **kw)
 
@@ -120,12 +119,6 @@ class TestClientVT(Base):
         # backoff 15 puis 30 après les 429 (pas d'attente après le dernier)
         self.assertEqual(self.sommeils, [15, 15, 30, 15])
 
-    def test_cache_sans_cle_api(self):
-        self.reponses = [ok_json()]
-        self.client(cle="SECRET123").consulter("ip-src", "8.8.4.4")
-        with open(self.cache, encoding="utf-8") as f:
-            self.assertNotIn("SECRET123", f.read())
-
     def test_valeur_echappee(self):
         self.reponses = [http(404)]
         self.client().consulter("domain", "a/b?c")
@@ -157,51 +150,23 @@ class TestClientVT(Base):
         r = self.client().consulter("target-user", "bob")
         self.assertEqual((r.statut, len(self.appels)), ("non_applicable", 0))
 
-    def test_cache(self):
-        self.reponses = [ok_json()]
-        c = self.client()
+    def test_interrogation_en_direct(self):
+        # Aucun cache disque : une même valeur n'est demandée qu'une fois au
+        # cours d'une exécution, et une nouvelle exécution réinterroge VirusTotal.
+        self.reponses = [ok_json(), ok_json()]
+        c = self.client(cle="SECRET123")
         c.consulter("ip-src", "8.8.4.4")
         r = c.consulter("ip-src", "8.8.4.4")
-        self.assertEqual((r.statut, len(self.appels)), ("ok", 1))
-        c2 = self.client()
-        r = c2.consulter("ip-src", "8.8.4.4")
         self.assertEqual((r.statut, len(self.appels), r.donnees["malicious"]), ("ok", 1, 3))
-        self.assertFalse(os.path.exists(self.cache + ".tmp"))
-
-    def test_sans_cache_disque(self):
-        # chemin_cache=None : rien n'est écrit, chaque exécution réinterroge VT ;
-        # une même valeur n'est demandée qu'une fois au cours d'une exécution.
-        self.reponses = [ok_json(), ok_json()]
-        c = ClientVT("K", None, urlopen=self.urlopen, horloge=lambda: self.t[0],
-                     dormir=self.sommeils.append)
-        c.consulter("ip-src", "8.8.4.4")
-        c.consulter("ip-src", "8.8.4.4")
-        self.assertEqual(len(self.appels), 1)
-        c2 = ClientVT("K", None, urlopen=self.urlopen, horloge=lambda: self.t[0],
-                      dormir=self.sommeils.append)
-        r = c2.consulter("ip-src", "8.8.4.4")
+        r = self.client(cle="SECRET123").consulter("ip-src", "8.8.4.4")
         self.assertEqual((r.statut, len(self.appels)), ("ok", 2))
         self.assertEqual(os.listdir(self.dossier), [])
 
-    def test_cache_expire(self):
-        self.reponses = [ok_json(), ok_json()]
-        c = self.client()
-        c.consulter("ip-src", "8.8.4.4")
-        self.t[0] += 25 * 3600
-        c.consulter("ip-src", "8.8.4.4")
-        self.assertEqual(len(self.appels), 2)
-
-    def test_indisponible_non_cache(self):
+    def test_indisponible_non_memorise(self):
         self.reponses = [TimeoutError(), ok_json()]
         c = self.client()
         c.consulter("ip-src", "8.8.4.4")
         self.assertEqual(c.consulter("ip-src", "8.8.4.4").statut, "ok")
-
-    def test_cache_corrompu(self):
-        with open(self.cache, "w") as f:
-            f.write("{pas du json")
-        self.reponses = [ok_json()]
-        self.assertEqual(self.client().consulter("ip-src", "8.8.4.4").statut, "ok")
 
     def test_intervalle(self):
         self.reponses = [ok_json(), ok_json()]
@@ -270,7 +235,7 @@ class TestDetailsVT(Base):
 def ioc_enrichi(corps, valeur="50.16.16.211"):
     i = IOC(type_misp="ip-src", valeur=valeur, categorie_misp="Network activity",
             commentaire="c", to_ids=True)
-    c = ClientVT("K", None, urlopen=lambda req, timeout=None: corps)
+    c = ClientVT("K", urlopen=lambda req, timeout=None: corps)
     enrichir_iocs([i], c)
     return i
 

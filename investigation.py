@@ -84,9 +84,6 @@ SORTIE_MISP = "iocs_misp.csv"
 SORTIE_STIX = "iocs_stix.json"
 
 # VirusTotal
-VT_CACHE = None     # None : interrogation en direct à chaque exécution (aucun fichier) ;
-                    # mettre un chemin (ex. "cache_vt.json") pour garder les réponses
-VT_TTL_HEURES = 24  # durée de validité du cache disque, s'il est activé
 VT_INTERVALLE_S = 15
 VT_TIMEOUT_S = 10
 VT_MAX_ESSAIS = 3
@@ -1089,8 +1086,7 @@ def investiguer(chemin: str, enrichir: bool = False, client_vt=None) -> Investig
     comptage_vt = None
     if enrichir:
         if client_vt is None:
-            client_vt = ClientVT(os.environ.get("VT_API_KEY"), VT_CACHE,
-                                 ttl_heures=VT_TTL_HEURES, intervalle_s=VT_INTERVALLE_S,
+            client_vt = ClientVT(os.environ.get("VT_API_KEY"), intervalle_s=VT_INTERVALLE_S,
                                  timeout_s=VT_TIMEOUT_S, max_essais=VT_MAX_ESSAIS)
         comptage_vt = enrichir_iocs(iocs, client_vt)
     return Investigation(chemin, evts, det, piv, chronos, actions, gravite, iocs,
